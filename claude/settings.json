@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "kasofsk-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "kasofsk/claude-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "block-env@kasofsk-plugins": true,
+    "check-gh-token@kasofsk-plugins": true
+  }
+}
