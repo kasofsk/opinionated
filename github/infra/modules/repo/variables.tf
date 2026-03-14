@@ -38,3 +38,45 @@ variable "dismiss_stale_reviews" {
   type        = bool
   default     = true
 }
+
+variable "required_status_check_contexts" {
+  description = "List of status check contexts that must pass before merging."
+  type        = list(string)
+  default     = []
+}
+
+variable "strict_status_checks" {
+  description = "Require the branch to be up-to-date with the base branch before merging."
+  type        = bool
+  default     = true
+}
+
+variable "require_signed_commits" {
+  description = "Require signed commits on the protected branch."
+  type        = bool
+  default     = false
+}
+
+variable "require_linear_history" {
+  description = "Require linear history (no merge commits) on the protected branch."
+  type        = bool
+  default     = false
+}
+
+variable "allow_squash_merge" {
+  description = "Allow squash merges on the repository."
+  type        = bool
+  default     = true
+}
+
+variable "allow_merge_commit" {
+  description = "Allow merge commits on the repository."
+  type        = bool
+  default     = false
+}
+
+variable "allow_rebase_merge" {
+  description = "Allow rebase merges on the repository."
+  type        = bool
+  default     = false
+}
