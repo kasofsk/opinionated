@@ -1,0 +1,119 @@
+{
+  "name": "hub",
+  "description": "Hub-and-spoke: independent work streams converge on a central integration milestone.",
+  "jobs": [
+    {
+      "id": "infra-plan",
+      "title": "[Infra] Plan cloud architecture",
+      "body": "Choose regions, instance types, network topology.",
+      "labels": ["priority:70"]
+    },
+    {
+      "id": "infra-terraform",
+      "title": "[Infra] Write Terraform modules",
+      "body": "Codify the architecture plan as reusable Terraform modules.",
+      "labels": ["priority:65"],
+      "depends_on": ["infra-plan"]
+    },
+    {
+      "id": "infra-ci",
+      "title": "[Infra] Set up CI pipeline",
+      "body": "GitHub Actions / Forgejo CI: lint, plan, apply on merge.",
+      "labels": ["priority:60"],
+      "depends_on": ["infra-terraform"]
+    },
+    {
+      "id": "auth-design",
+      "title": "[Auth] Design auth flow",
+      "body": "Decide on OAuth2 / OIDC provider and token lifecycle.",
+      "labels": ["priority:75"]
+    },
+    {
+      "id": "auth-impl",
+      "title": "[Auth] Implement auth middleware",
+      "body": "JWT validation, refresh logic, role extraction.",
+      "labels": ["priority:70"],
+      "depends_on": ["auth-design"]
+    },
+    {
+      "id": "auth-tests",
+      "title": "[Auth] Auth integration tests",
+      "body": "Token issuance, expiry, revocation, RBAC boundary tests.",
+      "labels": ["priority:60"],
+      "depends_on": ["auth-impl"]
+    },
+    {
+      "id": "fe-wireframes",
+      "title": "[Frontend] UX wireframes",
+      "body": "Figma mockups for all primary screens.",
+      "labels": ["priority:55"]
+    },
+    {
+      "id": "fe-components",
+      "title": "[Frontend] Build component library",
+      "body": "Reusable React components matching wireframes.",
+      "labels": ["priority:50"],
+      "depends_on": ["fe-wireframes"]
+    },
+    {
+      "id": "fe-integration",
+      "title": "[Frontend] Wire frontend to API",
+      "body": "Connect component library to REST endpoints, add auth header injection.",
+      "labels": ["priority:55"],
+      "depends_on": ["fe-components", "auth-impl"]
+    },
+    {
+      "id": "data-model",
+      "title": "[Data] Define core data model",
+      "body": "Entity definitions, field types, validation rules.",
+      "labels": ["priority:80"]
+    },
+    {
+      "id": "data-migrations",
+      "title": "[Data] Write DB migrations",
+      "body": "Alembic / Flyway migration scripts for the core model.",
+      "labels": ["priority:75"],
+      "depends_on": ["data-model"]
+    },
+    {
+      "id": "data-seed",
+      "title": "[Data] Seed data & fixtures",
+      "body": "Dev/staging seed data, factory helpers for tests.",
+      "labels": ["priority:50"],
+      "depends_on": ["data-migrations"]
+    },
+    {
+      "id": "hub-integration",
+      "title": "Integration milestone: all streams merged",
+      "body": "Smoke-test the full stack: infra provisioned, auth working, frontend connected, data migrated.",
+      "labels": ["priority:95"],
+      "depends_on": [
+        "infra-ci",
+        "auth-tests",
+        "fe-integration",
+        "data-seed"
+      ]
+    },
+    {
+      "id": "load-test",
+      "title": "Load testing & performance tuning",
+      "body": "k6 / Locust scenarios, identify bottlenecks, apply fixes.",
+      "labels": ["priority:65"],
+      "depends_on": ["hub-integration"]
+    },
+    {
+      "id": "security-audit",
+      "title": "Security audit",
+      "body": "SAST scan, dependency audit, pen-test checklist.",
+      "labels": ["priority:80"],
+      "depends_on": ["hub-integration"]
+    },
+    {
+      "id": "final-release",
+      "title": "Production release",
+      "body": "Final go/no-go checklist, tag, deploy, announce.",
+      "labels": ["priority:100"],
+      "depends_on": ["load-test", "security-audit"]
+    }
+  ]
+}

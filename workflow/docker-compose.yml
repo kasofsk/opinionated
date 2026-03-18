@@ -1,0 +1,34 @@
+services:
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    restart: unless-stopped
+    environment:
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__ROOT_URL: "http://localhost:3000"
+      FORGEJO__log__LEVEL: Warn
+    ports:
+      - "3000:3000"
+    volumes:
+      - forgejo-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/v1/version"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  nats:
+    image: nats:latest
+    restart: unless-stopped
+    command: --jetstream --store_dir /data
+    volumes:
+      - nats-data:/data
+    ports:
+      - "4223:4222"   # 4223 to avoid conflict with any existing NATS on 4222
+
+volumes:
+  forgejo-data:
+  nats-data:
