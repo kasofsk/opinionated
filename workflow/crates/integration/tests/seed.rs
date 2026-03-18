@@ -12,8 +12,8 @@
 ///
 ///   source <(terraform output -raw env_exports)
 ///
-/// The tests create and close issues within the pre-provisioned TEST_REPO.
-/// They do not create or delete repositories.
+/// Each test creates an ephemeral repository for full isolation, then
+/// deletes it during teardown.
 ///
 /// Run with:
 ///   cargo test -p workflow-integration-tests -- --include-ignored
@@ -50,39 +50,53 @@ fn env(key: &str, default: &str) -> String {
 
 // ── Test context ───────────────────────────────────────────────────────────
 
-/// Wraps the shared pre-provisioned repo.
-/// On drop, closes all issues created during the test so they don't
-/// accumulate across runs.
+/// Each test gets its own ephemeral repo for full isolation.
+/// On teardown the repo is deleted, removing all issues and webhooks.
 struct TestContext {
     forgejo: ForgejoClient,
     sidecar: SidecarClient,
     owner: String,
     repo: String,
-    /// Issue numbers created by this test, to be closed during teardown.
+    /// Issue numbers created by this test (used by seed/poll helpers).
     created: Vec<u64>,
 }
 
 impl TestContext {
-    fn new() -> Self {
+    /// Create an ephemeral repo with a unique name and configure the
+    /// sidecar webhook on it.
+    async fn new(test_name: &str) -> Self {
         let forgejo_url = env("FORGEJO_URL", "http://localhost:3000");
         let forgejo_token = env("FORGEJO_TOKEN", "");
         let sidecar_url = env("SIDECAR_URL", "http://localhost:8080");
-        let owner = env("TEST_OWNER", "admin");
-        let repo = env("TEST_REPO", "workflow-test");
-        Self {
-            forgejo: ForgejoClient::new(&forgejo_url, &forgejo_token),
-            sidecar: SidecarClient::new(&sidecar_url),
-            owner,
-            repo,
-            created: Vec::new(),
-        }
+        let sidecar_webhook_url = env(
+            "SIDECAR_WEBHOOK_URL",
+            "http://host.docker.internal:8080",
+        );
+        // Repos are created via /user/repos under the token owner's account.
+        let owner = env("TEST_REPO_OWNER", "workflow-sync");
+
+        let forgejo = ForgejoClient::new(&forgejo_url, &forgejo_token);
+        let sidecar = SidecarClient::new(&sidecar_url);
+
+        // Unique repo name per test run to avoid collisions.
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let repo = format!("test-{test_name}-{ts}");
+
+        forgejo.create_repo(&repo).await.expect("create ephemeral repo");
+        forgejo
+            .create_webhook(&owner, &repo, &format!("{sidecar_webhook_url}/webhook"))
+            .await
+            .expect("create webhook on ephemeral repo");
+
+        Self { forgejo, sidecar, owner, repo, created: Vec::new() }
     }
 
-    /// Close all issues created by this test context.
+    /// Delete the ephemeral repo, which removes all issues and webhooks.
     async fn teardown(self) {
-        for number in self.created {
-            let _ = self.forgejo.close_issue(&self.owner, &self.repo, number).await;
-        }
+        let _ = self.forgejo.delete_repo(&self.owner, &self.repo).await;
     }
 }
 
@@ -167,14 +181,15 @@ fn load_fixture(filename: &str) -> Result<Fixture> {
 #[tokio::test]
 #[ignore = "requires: terraform apply infra/test + env vars from terraform output -raw env_exports"]
 async fn chain_initial_states() {
-    let mut ctx = TestContext::new();
+    let mut ctx = TestContext::new("chain-init").await;
     let fixture = load_fixture("chain.json").unwrap();
 
     let id_map = seed(&mut ctx, &fixture).await.unwrap();
 
+    let expected_blocked = fixture.jobs.iter().filter(|j| !j.depends_on.is_empty()).count();
+
     let jobs = poll_until(Duration::from_secs(30), || async {
         let all = ctx.sidecar.list_jobs(None).await.ok()?;
-        // Filter to the exact issue numbers we just created.
         let mine: Vec<_> = all
             .into_iter()
             .filter(|j| ctx.created.contains(&j.number)
@@ -184,7 +199,12 @@ async fn chain_initial_states() {
         let stable = mine.iter().all(|j| {
             j.state == JobState::OnDeck || j.state == JobState::Blocked
         });
-        if mine.len() == fixture.jobs.len() && stable { Some(mine) } else { None }
+        let blocked = mine.iter().filter(|j| j.state == JobState::Blocked).count();
+        if mine.len() == fixture.jobs.len() && stable && blocked == expected_blocked {
+            Some(mine)
+        } else {
+            None
+        }
     })
     .await
     .expect("timed out waiting for sidecar to process chain jobs");
@@ -208,27 +228,38 @@ async fn chain_initial_states() {
 #[tokio::test]
 #[ignore = "requires: terraform apply infra/test + env vars from terraform output -raw env_exports"]
 async fn chain_completing_head_unblocks_next() {
-    let mut ctx = TestContext::new();
+    let mut ctx = TestContext::new("chain-complete").await;
     let fixture = load_fixture("chain.json").unwrap();
 
     let id_map = seed(&mut ctx, &fixture).await.unwrap();
+
+    let expected_blocked = fixture.jobs.iter().filter(|j| !j.depends_on.is_empty()).count();
 
     // Wait for stable initial state.
     poll_until(Duration::from_secs(30), || async {
         let all = ctx.sidecar.list_jobs(None).await.ok()?;
         let mine: Vec<_> = all
             .into_iter()
-            .filter(|j| ctx.created.contains(&j.number))
+            .filter(|j| ctx.created.contains(&j.number)
+                && j.repo_owner == ctx.owner
+                && j.repo_name == ctx.repo)
             .collect();
         let stable = mine.iter().all(|j| {
             j.state == JobState::OnDeck || j.state == JobState::Blocked
         });
-        if mine.len() == fixture.jobs.len() && stable { Some(()) } else { None }
+        let blocked = mine.iter().filter(|j| j.state == JobState::Blocked).count();
+        if mine.len() == fixture.jobs.len() && stable && blocked == expected_blocked {
+            Some(())
+        } else {
+            None
+        }
     })
     .await
     .expect("timed out waiting for initial state");
 
-    // Claim and complete "setup".
+    // Claim and complete "setup", then close the issue (simulating a
+    // reviewer merging the associated PR).  Dependency resolution is
+    // triggered by the Forgejo `closed` webhook, not by `/complete`.
     let setup_n = id_map["setup"];
     let worker = env("TEST_WORKER", "test-worker");
     ctx.sidecar
@@ -237,6 +268,7 @@ async fn chain_completing_head_unblocks_next() {
         .unwrap()
         .expect("setup should be claimable");
     ctx.sidecar.complete(&ctx.owner, &ctx.repo, setup_n, &worker).await.unwrap();
+    ctx.forgejo.close_issue(&ctx.owner, &ctx.repo, setup_n).await.unwrap();
 
     // "schema" (direct dependent) should become on-deck.
     let schema_n = id_map["schema"];
@@ -259,21 +291,31 @@ async fn chain_completing_head_unblocks_next() {
 #[tokio::test]
 #[ignore = "requires: terraform apply infra/test + env vars from terraform output -raw env_exports"]
 async fn hub_initial_states() {
-    let mut ctx = TestContext::new();
+    let mut ctx = TestContext::new("hub-init").await;
     let fixture = load_fixture("hub.json").unwrap();
 
     let id_map = seed(&mut ctx, &fixture).await.unwrap();
+
+    // Count how many jobs have dependencies — they should end up Blocked.
+    let expected_blocked = fixture.jobs.iter().filter(|j| !j.depends_on.is_empty()).count();
 
     let jobs = poll_until(Duration::from_secs(60), || async {
         let all = ctx.sidecar.list_jobs(None).await.ok()?;
         let mine: Vec<_> = all
             .into_iter()
-            .filter(|j| ctx.created.contains(&j.number))
+            .filter(|j| ctx.created.contains(&j.number)
+                && j.repo_owner == ctx.owner
+                && j.repo_name == ctx.repo)
             .collect();
         let stable = mine.iter().all(|j| {
             j.state == JobState::OnDeck || j.state == JobState::Blocked
         });
-        if mine.len() == fixture.jobs.len() && stable { Some(mine) } else { None }
+        let blocked = mine.iter().filter(|j| j.state == JobState::Blocked).count();
+        if mine.len() == fixture.jobs.len() && stable && blocked == expected_blocked {
+            Some(mine)
+        } else {
+            None
+        }
     })
     .await
     .expect("timed out waiting for sidecar to process hub jobs");

@@ -35,7 +35,12 @@ variable "repo_name" {
 
 variable "sidecar_login" {
   type    = string
-  default = "workflow-sidecar"
+  default = "workflow-sync"
+}
+
+variable "dispatcher_login" {
+  type    = string
+  default = "workflow-dispatcher"
 }
 
 variable "worker_logins" {
@@ -48,11 +53,6 @@ variable "email_domain" {
   default = "test.local"
 }
 
-variable "sidecar_url" {
-  description = "URL Forgejo uses to POST webhooks to the sidecar."
-  type        = string
-}
-
 variable "sidecar_api_url" {
   description = "URL the test process uses to call the sidecar API."
   type        = string
@@ -60,7 +60,38 @@ variable "sidecar_api_url" {
 }
 
 variable "sidecar_password" {
-  description = "Password for the sidecar service account. Passed through to the module."
+  description = "Password for the sync service account. Passed through to the module."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "dispatcher_password" {
+  description = "Password for the dispatcher service account. Passed through to the module."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "reviewer_login" {
+  type    = string
+  default = "workflow-reviewer"
+}
+
+variable "reviewer_password" {
+  description = "Password for the reviewer service account. Passed through to the module."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "human_login" {
+  type    = string
+  default = "you"
+}
+
+variable "human_password" {
+  description = "Password for the human reviewer account. Passed through to the module."
   type        = string
   default     = ""
   sensitive   = true

@@ -184,7 +184,28 @@ impl TaskGraph {
         Ok(extract_jobs(results).into_iter().map(|j| j.key()).collect())
     }
 
-    /// Returns true if every direct dependency of `job_key` is in a terminal state.
+    /// Check declared dep numbers directly by vertex lookup. Returns true only
+    /// if every dep vertex exists in the graph AND has state Done. This is safe
+    /// against the race where dep edges haven't been synced yet — if a dep
+    /// vertex doesn't exist, we return false.
+    pub fn all_declared_deps_done(
+        &self,
+        owner: &str,
+        repo: &str,
+        dep_numbers: &[u64],
+    ) -> Result<bool> {
+        for dep_num in dep_numbers {
+            let dep_key = format!("{owner}/{repo}/{dep_num}");
+            match self.get_job(&dep_key)? {
+                Some(j) if j.state == JobState::Done => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Returns true if every direct dependency of `job_key` is Done.
+    /// Revoked deps are terminal but do NOT satisfy this check — they block.
     pub fn all_deps_done(&self, job_key: &str) -> Result<bool> {
         let id = Self::job_uuid(job_key);
 
@@ -207,8 +228,9 @@ impl TaskGraph {
         let results = self.db.get(q).context("get dep states")?;
         let jobs = extract_jobs(results);
 
-        Ok(jobs.len() == dep_count && jobs.iter().all(|j| j.state.is_terminal()))
+        Ok(jobs.len() == dep_count && jobs.iter().all(|j| j.state == JobState::Done))
     }
+
 
     // ── DAG enforcement ───────────────────────────────────────────────────────
 
@@ -301,6 +323,7 @@ fn stub_job_from_key(key: &str) -> Option<Job> {
         dependency_numbers: vec![],
         priority: 50,
         timeout_secs: None,
+        capabilities: vec![],
     })
 }
 
@@ -327,6 +350,7 @@ mod tests {
             dependency_numbers: vec![],
             priority: 50,
             timeout_secs: None,
+            capabilities: vec![],
         }
     }
 

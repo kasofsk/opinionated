@@ -9,13 +9,16 @@ path = "src/main.rs"
 
 [dependencies]
 workflow-types = { path = "../types" }
+workflow-worker = { path = "../worker" }
 
 anyhow = { workspace = true }
 async-nats = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+dashmap = "6"
 futures = { workspace = true }
+rand = "0.9"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

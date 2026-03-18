@@ -126,6 +126,7 @@ async fn handle_opened(
         dependency_numbers: dep_numbers.clone(),
         priority,
         timeout_secs,
+        capabilities: workflow_types::parse_capabilities(&issue.labels),
     };
 
     // Upsert vertex and sync dep edges (enforces DAG)
@@ -212,6 +213,7 @@ async fn handle_edited(
         dependency_numbers: dep_numbers.clone(),
         priority,
         timeout_secs,
+        capabilities: workflow_types::parse_capabilities(&issue.labels),
     };
 
     state.graph.upsert_job(&job)?;

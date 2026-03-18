@@ -9,6 +9,7 @@ use serde::Deserialize;
 use workflow_types::{Job, JobState, RequeueTarget};
 use workflow_worker::{
     client::SidecarClient,
+    DispatchedWorkerLoop,
     forgejo::ForgejoClient,
     worker::{Outcome, Worker, WorkerLoop},
 };
@@ -79,12 +80,29 @@ enum Cmd {
         target: String,
     },
 
+    /// Run a simulated dispatched worker that auto-completes jobs after a delay
+    Sim {
+        /// NATS server URL
+        #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4223")]
+        nats_url: String,
+        /// Seconds to "work" on each job before completing
+        #[arg(long, default_value = "10")]
+        delay_secs: u64,
+    },
+
     /// Seed a Forgejo repo with jobs from a fixture file
     Seed {
         /// owner/repo to create issues in
         repo: String,
         /// Path to a fixture JSON file (e.g. demo/fixtures/chain.json)
         fixture: String,
+        /// Create the repo and webhook if they don't exist
+        #[arg(long)]
+        create_repo: bool,
+        /// Webhook target URL (used with --create-repo).
+        /// Defaults to SIDECAR_WEBHOOK_URL or http://host.docker.internal:8080
+        #[arg(long, env = "SIDECAR_WEBHOOK_URL")]
+        webhook_url: Option<String>,
     },
 }
 
@@ -142,11 +160,49 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::Seed { repo, fixture } => {
+        Cmd::Sim { nats_url, delay_secs } => {
+            let worker = SimWorker::new(args.worker_id.clone(), *delay_secs);
+            let loop_ = DispatchedWorkerLoop::new(
+                worker,
+                &args.forgejo_url,
+                &args.forgejo_token,
+                nats_url,
+                Duration::from_secs(args.heartbeat_secs),
+            )
+            .await?;
+            println!(
+                "Starting sim worker '{}' (delay={}s, nats={})",
+                args.worker_id, delay_secs, nats_url
+            );
+            loop_.run().await
+        }
+
+        Cmd::Seed { repo, fixture, create_repo, webhook_url } => {
             let forgejo = ForgejoClient::new(&args.forgejo_url, &args.forgejo_token);
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
             if parts.len() != 2 {
                 bail!("expected owner/repo, got: {repo}");
+            }
+            if *create_repo {
+                // Create the repo (ignores 409 if it already exists).
+                match forgejo.create_repo(parts[1]).await {
+                    Ok(()) => println!("Created repo {repo}"),
+                    Err(e) => {
+                        let msg = format!("{e}");
+                        if msg.contains("409") {
+                            println!("Repo {repo} already exists");
+                        } else {
+                            return Err(e.context("create repo"));
+                        }
+                    }
+                }
+                // Set up the sidecar webhook.
+                let wh = webhook_url.as_deref()
+                    .unwrap_or("http://host.docker.internal:8080");
+                let target = format!("{}/webhook", wh.trim_end_matches('/'));
+                forgejo.create_webhook(parts[0], parts[1], &target).await
+                    .context("create webhook")?;
+                println!("Webhook → {target}");
             }
             cmd_seed(&forgejo, parts[0], parts[1], fixture).await
         }
@@ -270,14 +326,17 @@ async fn cmd_seed(
     let fixture: Fixture =
         serde_json::from_str(&raw).with_context(|| format!("parse {fixture_path}"))?;
 
+    // Derive sidecar URL from SIDECAR_URL env (default localhost:8080).
+    let sidecar_url = std::env::var("SIDECAR_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let sidecar = SidecarClient::new(&sidecar_url);
+
     println!("Seeding \"{}\" into {owner}/{repo} …", fixture.name);
 
     // Phase 1 — create all issues without dep markers so each gets a real number.
-    // Map symbolic id → Forgejo issue number.
+    // Wait for the sidecar to pick up each issue via webhook before proceeding.
     let mut id_to_number: HashMap<String, u64> = HashMap::new();
 
     for job in &fixture.jobs {
-        // Build a temporary body without deps (added in phase 2).
         let tmp_body = if job.body.is_empty() {
             job.title.clone()
         } else {
@@ -287,12 +346,15 @@ async fn cmd_seed(
         let number = forgejo.create_issue(owner, repo, &job.title, &tmp_body).await?;
         println!("  #{number}  {}", job.title);
         id_to_number.insert(job.id.clone(), number);
+
+        // Wait for sidecar to acknowledge this issue via webhook.
+        wait_for_job(&sidecar, owner, repo, number).await?;
     }
 
     // Phase 2 — patch each issue body to inject the `<!-- workflow:deps:... -->` marker.
+    // Wait after each edit to confirm the sidecar synced the dependency edges.
     for job in &fixture.jobs {
         if job.depends_on.is_empty() {
-            // Optionally add labels-only header; skip dep injection.
             continue;
         }
 
@@ -320,11 +382,53 @@ async fn cmd_seed(
         };
 
         forgejo.edit_issue_body(owner, repo, number, &new_body).await?;
+
+        let expected_deps: Vec<u64> = dep_numbers.iter().filter_map(|s| s.parse().ok()).collect();
+        wait_for_deps(&sidecar, owner, repo, number, &expected_deps).await?;
         println!("  #{number}  deps → [{}]", dep_numbers.join(", "));
     }
 
     println!("Done. {} issues created.", fixture.jobs.len());
     Ok(())
+}
+
+/// Poll the sidecar until a job appears in the graph.
+async fn wait_for_job(
+    sidecar: &SidecarClient,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<()> {
+    for _ in 0..120 {
+        if sidecar.get_job(owner, repo, number).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    bail!("timed out waiting for sidecar to sync #{number}");
+}
+
+/// Poll the sidecar until a job's dependency list matches expectations.
+async fn wait_for_deps(
+    sidecar: &SidecarClient,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    expected: &[u64],
+) -> Result<()> {
+    for _ in 0..120 {
+        if let Ok(resp) = sidecar.get_job(owner, repo, number).await {
+            let mut got = resp.job.dependency_numbers.clone();
+            let mut want = expected.to_vec();
+            got.sort();
+            want.sort();
+            if got == want {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    bail!("timed out waiting for deps on #{number}");
 }
 
 // ── CliWorker ─────────────────────────────────────────────────────────────────
@@ -356,10 +460,90 @@ impl Worker for CliWorker {
     async fn execute(
         &self,
         job: &Job,
-        _sidecar: &SidecarClient,
         _forgejo: &ForgejoClient,
     ) -> Result<Outcome> {
         Ok(interactive_session(job))
+    }
+}
+
+// ── SimWorker ────────────────────────────────────────────────────────────────
+
+struct SimWorker {
+    worker_id: String,
+    delay_secs: u64,
+}
+
+impl SimWorker {
+    fn new(worker_id: String, delay_secs: u64) -> Self {
+        Self { worker_id, delay_secs }
+    }
+}
+
+#[async_trait]
+impl Worker for SimWorker {
+    fn worker_id(&self) -> &str {
+        &self.worker_id
+    }
+
+    async fn execute(
+        &self,
+        job: &Job,
+        forgejo: &ForgejoClient,
+    ) -> Result<Outcome> {
+        tracing::info!(
+            key = %job.key(),
+            title = %job.title,
+            priority = job.priority,
+            "simulating work for {}s",
+            self.delay_secs
+        );
+
+        // Create a branch, commit a file, and open a PR so there's something to review.
+        let branch_name = format!("work/{}/{}", self.worker_id, job.number);
+        let file_path = format!("work/{}.md", job.number);
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let file_content = format!(
+            "# {}\n\nWorker: {}\nTimestamp: {}\n",
+            job.title, self.worker_id, timestamp
+        );
+        let commit_msg = format!("work: {} (#{}) by {}", job.title, job.number, self.worker_id);
+        let pr_body = format!(
+            "Closes #{}\n\nSimulated work by {}",
+            job.number, self.worker_id
+        );
+
+        match forgejo.create_branch(&job.repo_owner, &job.repo_name, &branch_name, "main").await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(key = %job.key(), error = %e, "branch creation failed (may already exist from rework), continuing");
+            }
+        }
+
+        match forgejo.create_file(
+            &job.repo_owner, &job.repo_name, &file_path,
+            &file_content, &commit_msg, &branch_name,
+        ).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(key = %job.key(), error = %e, "file creation failed, continuing");
+            }
+        }
+
+        match forgejo.create_pr(
+            &job.repo_owner, &job.repo_name,
+            &job.title, &pr_body, &branch_name, "main",
+        ).await {
+            Ok(pr) => {
+                tracing::info!(key = %job.key(), pr_number = pr.number, "opened PR");
+            }
+            Err(e) => {
+                tracing::warn!(key = %job.key(), error = %e, "PR creation failed (may already exist), continuing");
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(self.delay_secs)).await;
+        tracing::info!(key = %job.key(), "sim complete");
+        Ok(Outcome::Complete)
     }
 }
 
@@ -493,8 +677,10 @@ fn state_label(state: &JobState) -> &'static str {
         JobState::OnDeck => "on-deck",
         JobState::OnTheStack => "on-the-stack",
         JobState::InReview => "in-review",
+        JobState::Rework => "rework",
         JobState::Done => "done",
         JobState::Failed => "failed",
+        JobState::Revoked => "revoked",
     }
 }
 

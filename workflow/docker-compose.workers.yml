@@ -1,0 +1,61 @@
+# Worker containers — start after init.sh has set up Forgejo + sidecar.
+#
+# Usage:
+#   ./scripts/workers.sh              # creates tokens, starts all 3 workers
+#   ./scripts/workers.sh --count 2    # start only 2 workers
+#   ./scripts/workers.sh --down       # stop workers
+#
+# Each worker authenticates as its Forgejo user and connects to NATS
+# for dispatched job execution.
+
+services:
+
+  worker-aria:
+    image: workflow-worker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command:
+      - sim
+      - --nats-url=nats://nats:4222
+    environment:
+      WORKER_ID: worker-aria
+      FORGEJO_URL: http://forgejo:3000
+      FORGEJO_TOKEN: ${WORKER_ARIA_TOKEN}
+    depends_on: []
+    restart: unless-stopped
+
+  worker-blake:
+    image: workflow-worker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command:
+      - sim
+      - --nats-url=nats://nats:4222
+    environment:
+      WORKER_ID: worker-blake
+      FORGEJO_URL: http://forgejo:3000
+      FORGEJO_TOKEN: ${WORKER_BLAKE_TOKEN}
+    depends_on: []
+    restart: unless-stopped
+
+  worker-casey:
+    image: workflow-worker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command:
+      - sim
+      - --nats-url=nats://nats:4222
+    environment:
+      WORKER_ID: worker-casey
+      FORGEJO_URL: http://forgejo:3000
+      FORGEJO_TOKEN: ${WORKER_CASEY_TOKEN}
+    depends_on: []
+    restart: unless-stopped
+
+networks:
+  default:
+    external: true
+    name: workflow_default

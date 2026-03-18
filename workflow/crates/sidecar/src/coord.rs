@@ -3,17 +3,21 @@ use async_nats::jetstream::{self, kv};
 use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
-use workflow_types::ClaimState;
+use workflow_types::{ClaimState, JobTransition, JournalEntry};
 
 const CLAIMS_BUCKET: &str = "workflow-claims";
 /// Short TTL so tombstones from released claims don't accumulate forever.
 const DEDUP_BUCKET: &str = "workflow-webhook-dedup";
 /// 24-hour TTL for dedup entries (nanoseconds for NATS config).
 const DEDUP_TTL_SECS: u64 = 86_400;
+const JOURNAL_BUCKET: &str = "workflow-dispatch-journal";
+/// 7-day TTL for journal entries.
+const JOURNAL_TTL_SECS: u64 = 7 * 86_400;
 
 pub struct Coordinator {
     kv_claims: kv::Store,
     kv_dedup: kv::Store,
+    kv_journal: kv::Store,
     nats: async_nats::Client,
 }
 
@@ -43,7 +47,17 @@ impl Coordinator {
             .await
             .context("create workflow-webhook-dedup KV bucket")?;
 
-        Ok(Self { kv_claims, kv_dedup, nats: client })
+        let kv_journal = js
+            .create_key_value(kv::Config {
+                bucket: JOURNAL_BUCKET.to_string(),
+                history: 1,
+                max_age: std::time::Duration::from_secs(JOURNAL_TTL_SECS),
+                ..Default::default()
+            })
+            .await
+            .context("create workflow-dispatch-journal KV bucket")?;
+
+        Ok(Self { kv_claims, kv_dedup, kv_journal, nats: client })
     }
 
     /// Returns a reference to the raw NATS client for publishing events.
@@ -176,5 +190,99 @@ impl Coordinator {
             .await
             .context("publish NATS event")?;
         Ok(())
+    }
+
+    // ── Journal persistence ────────────────────────────────────────────────
+
+    /// Append a journal entry to NATS KV. Errors are logged, not propagated.
+    pub async fn append_journal(&self, entry: &JournalEntry) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let ts = entry.timestamp.timestamp_millis();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let key = format!("{ts}.{seq}");
+
+        match serde_json::to_vec(entry) {
+            Ok(payload) => {
+                if let Err(e) = self.kv_journal.put(&key, Bytes::from(payload)).await {
+                    tracing::warn!(key, error = %e, "failed to persist journal entry");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize journal entry");
+            }
+        }
+    }
+
+    /// Read recent journal entries from NATS KV, sorted newest-first.
+    pub async fn list_journal(&self, limit: usize) -> Vec<JournalEntry> {
+        let mut entries = Vec::new();
+
+        let keys = match self.kv_journal.keys().await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list journal keys");
+                return entries;
+            }
+        };
+
+        let mut all_keys: Vec<String> = Vec::new();
+        let mut keys = keys;
+        while let Some(Ok(key)) = keys.next().await {
+            all_keys.push(key);
+        }
+
+        // Keys are "{timestamp_millis}.{seq}" — reverse sort gives newest first.
+        let mut sorted_keys = all_keys;
+        sorted_keys.sort_unstable_by(|a, b| b.cmp(a));
+        sorted_keys.truncate(limit);
+
+        for key in &sorted_keys {
+            match self.kv_journal.entry(key).await {
+                Ok(Some(entry)) if entry.operation == kv::Operation::Put => {
+                    match serde_json::from_slice::<JournalEntry>(&entry.value) {
+                        Ok(je) => entries.push(je),
+                        Err(e) => tracing::warn!(key, error = %e, "bad journal entry"),
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        entries
+    }
+
+    /// Fire-and-forget publish of a state-transition event.
+    ///
+    /// Used by the consumer, API handlers, and monitor so that the
+    /// dispatcher (and future reactors) can react to state changes
+    /// without coupling to the mutation site.
+    pub async fn publish_transition(&self, event: &JobTransition) {
+        match serde_json::to_vec(event) {
+            Ok(payload) => {
+                if let Err(e) = self
+                    .nats
+                    .publish(
+                        "workflow.jobs.transition",
+                        Bytes::from(payload),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        job = %event.job.key(),
+                        error = %e,
+                        "failed to publish transition event"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    job = %event.job.key(),
+                    error = %e,
+                    "failed to serialize transition event"
+                );
+            }
+        }
     }
 }

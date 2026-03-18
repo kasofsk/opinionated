@@ -1,0 +1,17 @@
+FROM rust:latest AS builder
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+RUN cargo build --release -p worker-cli
+
+# ── runtime ──────────────────────────────────────────────────────────────────
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/worker-cli /usr/local/bin/worker-cli
+
+ENTRYPOINT ["worker-cli"]

@@ -42,12 +42,23 @@ module "forgejo" {
   sidecar_email    = "${var.sidecar_login}@${var.email_domain}"
   sidecar_password = var.sidecar_password
 
+  dispatcher_login    = var.dispatcher_login
+  dispatcher_email    = "${var.dispatcher_login}@${var.email_domain}"
+  dispatcher_password = var.dispatcher_password
+
+  reviewer_login    = var.reviewer_login
+  reviewer_email    = "${var.reviewer_login}@${var.email_domain}"
+  reviewer_password = var.reviewer_password
+
+  human_login    = var.human_login
+  human_email    = "${var.human_login}@${var.email_domain}"
+  human_password = var.human_password
+
   workers = {
     for login in var.worker_logins :
     login => { email = "${login}@${var.email_domain}" }
   }
 
-  sidecar_url = var.sidecar_url
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
@@ -68,6 +79,10 @@ output "sidecar_login" {
   value = module.forgejo.sidecar_login
 }
 
+output "dispatcher_login" {
+  value = module.forgejo.dispatcher_login
+}
+
 output "worker_passwords" {
   value     = module.forgejo.worker_initial_passwords
   sensitive = true
@@ -78,7 +93,6 @@ output "env_exports" {
   value = <<-ENV
     export FORGEJO_URL="${var.forgejo_url}"
     export SIDECAR_URL="${var.sidecar_api_url}"
-    export SIDECAR_WEBHOOK_URL="${var.sidecar_url}"
     export TEST_OWNER="${var.repo_owner}"
     export TEST_REPO="${var.repo_name}"
   ENV

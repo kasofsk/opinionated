@@ -8,7 +8,8 @@ use std::sync::Arc;
 use workflow_types::{
     AbandonRequest, ClaimRequest, ClaimResponse, CompleteRequest, DepsResponse,
     FailRequest, FactoryListResponse, HeartbeatRequest, Job, JobListResponse,
-    JobResponse, JobState, RequeueRequest, RequeueTarget,
+    JobResponse, JobState, JobTransition, JournalResponse, RequeueRequest, RequeueTarget,
+    UserListResponse, WorkerListResponse,
 };
 
 use crate::error::AppError;
@@ -110,6 +111,13 @@ pub async fn claim_job(
         .await?;
 
     let job = s.graph.get_job(&key)?.ok_or(AppError::NotFound)?;
+
+    s.coord.publish_transition(&JobTransition {
+        job: job.clone(),
+        previous_state: Some(JobState::OnDeck),
+        new_state: JobState::OnTheStack,
+    }).await;
+
     Ok(Json(ClaimResponse { job, claim }))
 }
 
@@ -142,7 +150,15 @@ pub async fn complete_job(
     s.forgejo
         .set_job_state(&owner, &repo, number, &JobState::InReview)
         .await?;
-    s.forgejo.clear_assignees(&owner, &repo, number).await?;
+
+    if let Some(job) = s.graph.get_job(&key)? {
+        s.coord.publish_transition(&JobTransition {
+            job,
+            previous_state: Some(JobState::OnTheStack),
+            new_state: JobState::InReview,
+        }).await;
+    }
+
     Ok(())
 }
 
@@ -158,7 +174,15 @@ pub async fn abandon_job(
     s.coord.release(&key).await?;
     s.graph.set_state(&key, &JobState::OnDeck)?;
     s.forgejo.set_job_state(&owner, &repo, number, &JobState::OnDeck).await?;
-    s.forgejo.clear_assignees(&owner, &repo, number).await?;
+
+    if let Some(job) = s.graph.get_job(&key)? {
+        s.coord.publish_transition(&JobTransition {
+            job,
+            previous_state: Some(JobState::OnTheStack),
+            new_state: JobState::OnDeck,
+        }).await;
+    }
+
     Ok(())
 }
 
@@ -185,7 +209,15 @@ pub async fn fail_job(
     s.forgejo
         .post_failure_comment(&owner, &repo, number, &failure)
         .await?;
-    s.forgejo.clear_assignees(&owner, &repo, number).await?;
+
+    if let Some(job) = s.graph.get_job(&key)? {
+        s.coord.publish_transition(&JobTransition {
+            job,
+            previous_state: Some(JobState::OnTheStack),
+            new_state: JobState::Failed,
+        }).await;
+    }
+
     Ok(())
 }
 
@@ -197,6 +229,9 @@ pub async fn requeue_job(
     let key = format!("{owner}/{repo}/{number}");
     let _ = s.graph.get_job(&key)?.ok_or(AppError::NotFound)?;
 
+    let job = s.graph.get_job(&key)?.ok_or(AppError::NotFound)?;
+    let previous_state = job.state.clone();
+
     let new_state = match body.target {
         RequeueTarget::OnDeck => JobState::OnDeck,
         RequeueTarget::OnIce => JobState::OnIce,
@@ -204,6 +239,17 @@ pub async fn requeue_job(
 
     s.graph.set_state(&key, &new_state)?;
     s.forgejo.set_job_state(&owner, &repo, number, &new_state).await?;
+
+    if previous_state != new_state {
+        let mut updated_job = job;
+        updated_job.state = new_state.clone();
+        s.coord.publish_transition(&JobTransition {
+            job: updated_job,
+            previous_state: Some(previous_state),
+            new_state,
+        }).await;
+    }
+
     Ok(())
 }
 
@@ -252,6 +298,36 @@ pub async fn poll_factory(
         .await
         .map_err(|_| AppError::NotFound)?;
     Ok(())
+}
+
+// ── Users ────────────────────────────────────────────────────────────────────
+
+pub async fn list_users(
+    State(s): State<Arc<AppState>>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<UserListResponse>> {
+    let users = s.forgejo.get_repo_collaborators(&owner, &repo).await?;
+    Ok(Json(UserListResponse { users }))
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────────
+
+pub async fn list_dispatch_workers(
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<WorkerListResponse>> {
+    let workers: Vec<_> = s
+        .dispatch_registry
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
+    Ok(Json(WorkerListResponse { workers }))
+}
+
+pub async fn get_dispatch_journal(
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<JournalResponse>> {
+    let entries = s.coord.list_journal(200).await;
+    Ok(Json(JournalResponse { entries }))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

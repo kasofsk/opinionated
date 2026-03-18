@@ -3,7 +3,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
-use workflow_types::{FailureRecord, ForgejoIssue, ForgejoLabel, JobState};
+use workflow_types::{FailureRecord, ForgejoIssue, ForgejoLabel, JobState, UserInfo};
 
 pub struct ForgejoClient {
     base_url: String,
@@ -281,6 +281,26 @@ impl ForgejoClient {
         self.post_comment(owner, repo, number, &failure.to_comment_body())
             .await
     }
+
+    // ── Collaborators ──────────────────────────────────────────────────────────
+
+    pub async fn get_repo_collaborators(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<UserInfo>> {
+        let url = self.api(&format!("/repos/{owner}/{repo}/collaborators"));
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .context("get collaborators")?
+            .error_for_status()
+            .context("get collaborators response")?;
+        Ok(resp.json().await?)
+    }
 }
 
 /// Pick a consistent color for well-known label names.
@@ -291,8 +311,10 @@ fn label_color(name: &str) -> &'static str {
         "status:on-deck"      => "#16a34a",
         "status:on-the-stack" => "#2563eb",
         "status:in-review"    => "#9333ea",
+        "status:rework"       => "#f59e0b",
         "status:done"         => "#6b7280",
         "status:failed"       => "#dc2626",
+        "status:revoked"      => "#6b7280",
         _                     => "#ededed",
     }
 }

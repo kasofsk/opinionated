@@ -32,10 +32,3 @@ variable "email_domain" {
   default     = "example.com"
 }
 
-variable "sidecar_url" {
-  description = <<-EOT
-    URL Forgejo uses to reach the sidecar.
-    In docker-compose this is the container name, e.g. "http://sidecar:8080".
-  EOT
-  type = string
-}

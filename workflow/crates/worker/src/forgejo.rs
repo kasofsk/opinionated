@@ -40,8 +40,19 @@ pub struct Branch {
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
+    pub body: Option<String>,
     pub html_url: String,
     pub state: String,
+    #[serde(default)]
+    pub merged: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ChangedFile {
+    pub filename: String,
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 #[derive(Serialize)]
@@ -314,6 +325,39 @@ impl ForgejoClient {
         Ok(pr)
     }
 
+    // ── File creation ─────────────────────────────────────────────────────────
+
+    /// Create or update a file in a repository via the Forgejo contents API.
+    pub async fn create_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        content: &str,
+        message: &str,
+        branch: &str,
+    ) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            content: String,
+            message: &'a str,
+            branch: &'a str,
+        }
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+        let url = self.api(&format!("/repos/{owner}/{repo}/contents/{path}"));
+        self.http
+            .post(&url)
+            .header("Authorization", self.auth())
+            .json(&Body { content: encoded, message, branch })
+            .send()
+            .await
+            .context("create file")?
+            .error_for_status()
+            .context("create file response")?;
+        Ok(())
+    }
+
     // ── Repository management ─────────────────────────────────────────────────
 
     /// Create a repository under the authenticated user's account.
@@ -415,5 +459,131 @@ impl ForgejoClient {
             .json()
             .await?;
         Ok(pr)
+    }
+
+    /// List open PRs for a repo.
+    pub async fn list_prs(
+        &self,
+        owner: &str,
+        repo: &str,
+        state: &str,
+    ) -> Result<Vec<PullRequest>> {
+        let url = self.api(&format!("/repos/{owner}/{repo}/pulls?state={state}&limit=50"));
+        let prs: Vec<PullRequest> = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .context("list PRs")?
+            .error_for_status()
+            .context("list PRs response")?
+            .json()
+            .await?;
+        Ok(prs)
+    }
+
+    /// Submit a review on a pull request.
+    /// `event` should be "APPROVED" or "REQUEST_CHANGES".
+    pub async fn submit_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+        body: &str,
+        event: &str,
+    ) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            body: &'a str,
+            event: &'a str,
+        }
+        let url = self.api(&format!("/repos/{owner}/{repo}/pulls/{pr_number}/reviews"));
+        self.http
+            .post(&url)
+            .header("Authorization", self.auth())
+            .json(&Body { body, event })
+            .send()
+            .await
+            .context("submit review")?
+            .error_for_status()
+            .context("submit review response")?;
+        Ok(())
+    }
+
+    /// Merge a pull request.
+    /// `merge_style` should be "merge", "squash", or "rebase".
+    pub async fn merge_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+        merge_style: &str,
+    ) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            #[serde(rename = "Do")]
+            do_action: &'a str,
+        }
+        let url = self.api(&format!("/repos/{owner}/{repo}/pulls/{pr_number}/merge"));
+        self.http
+            .post(&url)
+            .header("Authorization", self.auth())
+            .json(&Body { do_action: merge_style })
+            .send()
+            .await
+            .context("merge PR")?
+            .error_for_status()
+            .context("merge PR response")?;
+        Ok(())
+    }
+
+    /// Add a reviewer to a pull request.
+    pub async fn add_pr_reviewer(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+        reviewer_login: &str,
+    ) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            reviewers: Vec<&'a str>,
+        }
+        let url = self.api(&format!(
+            "/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers"
+        ));
+        self.http
+            .post(&url)
+            .header("Authorization", self.auth())
+            .json(&Body { reviewers: vec![reviewer_login] })
+            .send()
+            .await
+            .context("add PR reviewer")?
+            .error_for_status()
+            .context("add PR reviewer response")?;
+        Ok(())
+    }
+
+    /// List changed files in a pull request.
+    pub async fn list_pr_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Vec<ChangedFile>> {
+        let url = self.api(&format!("/repos/{owner}/{repo}/pulls/{pr_number}/files"));
+        let files: Vec<ChangedFile> = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .context("list PR files")?
+            .error_for_status()
+            .context("list PR files response")?
+            .json()
+            .await?;
+        Ok(files)
     }
 }

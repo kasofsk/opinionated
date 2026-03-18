@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use workflow_types::{FailureKind, FailureRecord};
+use workflow_types::{FailureKind, FailureRecord, JobState, JobTransition};
 
 use crate::AppState;
 
@@ -90,6 +90,15 @@ async fn check_timeouts(state: &Arc<AppState>) -> anyhow::Result<()> {
             .await
         {
             tracing::error!(key, "failed to post failure comment: {e:#}");
+        }
+
+        // Publish transition so the dispatcher can react.
+        if let Ok(Some(job)) = state.graph.get_job(&key) {
+            state.coord.publish_transition(&JobTransition {
+                job,
+                previous_state: Some(JobState::OnTheStack),
+                new_state: JobState::Failed,
+            }).await;
         }
     }
 

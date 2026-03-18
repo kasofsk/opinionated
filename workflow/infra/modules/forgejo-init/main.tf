@@ -12,8 +12,26 @@ resource "random_password" "workers" {
   special  = true
 }
 
+resource "random_password" "dispatcher" {
+  length  = 32
+  special = true
+}
+
+resource "random_password" "reviewer" {
+  length  = 32
+  special = true
+}
+
+resource "random_password" "human" {
+  length  = 24
+  special = true
+}
+
 locals {
-  sidecar_password = var.sidecar_password != "" ? var.sidecar_password : random_password.sidecar.result
+  sidecar_password    = var.sidecar_password != "" ? var.sidecar_password : random_password.sidecar.result
+  dispatcher_password = var.dispatcher_password != "" ? var.dispatcher_password : random_password.dispatcher.result
+  reviewer_password   = var.reviewer_password != "" ? var.reviewer_password : random_password.reviewer.result
+  human_password      = var.human_password != "" ? var.human_password : random_password.human.result
 
   worker_passwords = {
     for login, _ in var.workers :
@@ -28,6 +46,33 @@ resource "gitea_user" "sidecar" {
   login_name           = var.sidecar_login
   password             = local.sidecar_password
   email                = var.sidecar_email
+  must_change_password = false
+  admin                = false
+}
+
+resource "gitea_user" "dispatcher" {
+  username             = var.dispatcher_login
+  login_name           = var.dispatcher_login
+  password             = local.dispatcher_password
+  email                = var.dispatcher_email
+  must_change_password = false
+  admin                = false
+}
+
+resource "gitea_user" "reviewer" {
+  username             = var.reviewer_login
+  login_name           = var.reviewer_login
+  password             = local.reviewer_password
+  email                = var.reviewer_email
+  must_change_password = false
+  admin                = false
+}
+
+resource "gitea_user" "human" {
+  username             = var.human_login
+  login_name           = var.human_login
+  password             = local.human_password
+  email                = var.human_email
   must_change_password = false
   admin                = false
 }
@@ -89,6 +134,14 @@ locals {
       color       = "#b60205"
       description = "Worker reported failure"
     }
+    "status:rework" = {
+      color       = "#f59e0b"
+      description = "Change requests received, needs rework by original worker"
+    }
+    "status:revoked" = {
+      color       = "#6b7280"
+      description = "Rejected without completion — dependents blocked"
+    }
     "status:on-ice" = {
       color       = "#cfd3d7"
       description = "Deliberately paused — will not be claimed"
@@ -119,25 +172,115 @@ resource "null_resource" "labels" {
   depends_on = [gitea_repository.workflow]
 }
 
-# ── Sidecar webhook ───────────────────────────────────────────────────────────
+# ── Sidecar repo access ─────────────────────────────────────────────────────
+#
+# The sidecar needs write access to the repo to manage labels on issues.
+# Forgejo 14+ enforces repo-level permissions in addition to token scopes.
 
-resource "null_resource" "webhook" {
+# ── Worker repo access ──────────────────────────────────────────────────────
+#
+# Workers get "write" permission: push branches, create PRs, comment on issues.
+# They cannot merge to protected branches or administer the repo.
+
+resource "null_resource" "worker_collaborators" {
+  for_each = var.workers
+
   triggers = {
-    repo = "${var.repo_owner}/${gitea_repository.workflow.name}"
-    url  = "${trimsuffix(var.sidecar_url, "/")}/webhook"
+    repo  = "${var.repo_owner}/${gitea_repository.workflow.name}"
+    login = gitea_user.workers[each.key].username
   }
 
   provisioner "local-exec" {
     command = <<-CMD
-      curl -sf -X POST \
+      curl -sf -X PUT \
         -H "Authorization: token ${var.forgejo_admin_token}" \
         -H "Content-Type: application/json" \
-        -d '{"type":"gitea","config":{"url":"${trimsuffix(var.sidecar_url, "/")}/webhook","content_type":"json"},"events":["issues"],"active":true}' \
-        "${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/hooks" \
+        -d '{"permission":"write"}' \
+        "${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/collaborators/${gitea_user.workers[each.key].username}" \
         > /dev/null || true
     CMD
   }
 
-  depends_on = [gitea_repository.workflow]
+  depends_on = [gitea_repository.workflow, gitea_user.workers]
+}
+
+resource "null_resource" "dispatcher_collaborator" {
+  triggers = {
+    repo  = "${var.repo_owner}/${gitea_repository.workflow.name}"
+    login = gitea_user.dispatcher.username
+  }
+
+  provisioner "local-exec" {
+    command = <<-CMD
+      curl -sf -X PUT \
+        -H "Authorization: token ${var.forgejo_admin_token}" \
+        -H "Content-Type: application/json" \
+        -d '{"permission":"write"}' \
+        "${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/collaborators/${gitea_user.dispatcher.username}" \
+        > /dev/null || true
+    CMD
+  }
+
+  depends_on = [gitea_repository.workflow, gitea_user.dispatcher]
+}
+
+resource "null_resource" "reviewer_collaborator" {
+  triggers = {
+    repo  = "${var.repo_owner}/${gitea_repository.workflow.name}"
+    login = gitea_user.reviewer.username
+  }
+
+  provisioner "local-exec" {
+    command = <<-CMD
+      curl -sf -X PUT \
+        -H "Authorization: token ${var.forgejo_admin_token}" \
+        -H "Content-Type: application/json" \
+        -d '{"permission":"write"}' \
+        "${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/collaborators/${gitea_user.reviewer.username}" \
+        > /dev/null || true
+    CMD
+  }
+
+  depends_on = [gitea_repository.workflow, gitea_user.reviewer]
+}
+
+resource "null_resource" "human_collaborator" {
+  triggers = {
+    repo  = "${var.repo_owner}/${gitea_repository.workflow.name}"
+    login = gitea_user.human.username
+  }
+
+  provisioner "local-exec" {
+    command = <<-CMD
+      curl -sf -X PUT \
+        -H "Authorization: token ${var.forgejo_admin_token}" \
+        -H "Content-Type: application/json" \
+        -d '{"permission":"write"}' \
+        "${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/collaborators/${gitea_user.human.username}" \
+        > /dev/null || true
+    CMD
+  }
+
+  depends_on = [gitea_repository.workflow, gitea_user.human]
+}
+
+resource "null_resource" "sidecar_collaborator" {
+  triggers = {
+    repo  = "${var.repo_owner}/${gitea_repository.workflow.name}"
+    login = gitea_user.sidecar.username
+  }
+
+  provisioner "local-exec" {
+    command = <<-CMD
+      curl -sf -X PUT \
+        -H "Authorization: token ${var.forgejo_admin_token}" \
+        -H "Content-Type: application/json" \
+        -d '{"permission":"write"}' \
+        "${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/collaborators/${gitea_user.sidecar.username}" \
+        > /dev/null || true
+    CMD
+  }
+
+  depends_on = [gitea_repository.workflow, gitea_user.sidecar]
 }
 

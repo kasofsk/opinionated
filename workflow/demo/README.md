@@ -89,8 +89,8 @@ The `seed` command does two passes:
    <!-- workflow:deps:3,7,12 -->
    ```
 
-   The sidecar picks this up on the next `edited` webhook and wires the
-   edges in the task graph.
+   The CDC process detects the change and publishes a snapshot. The
+   sidecar consumer picks it up and wires the edges in the task graph.
 
 The task graph enforces DAG invariants: if any dependency would form a
 cycle the sidecar rejects it and posts a warning comment on the issue.

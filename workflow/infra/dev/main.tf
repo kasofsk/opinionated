@@ -29,18 +29,28 @@ module "forgejo" {
   repo_description = "Workflow task tracking (dev)"
   repo_private     = false
 
-  # Sidecar service account
-  sidecar_login = "workflow-sidecar"
-  sidecar_email = "sidecar@${var.email_domain}"
+  # Sync service account (labels, deps)
+  sidecar_login = "workflow-sync"
+  sidecar_email = "workflow-sync@${var.email_domain}"
+
+  # Dispatcher service account (assignees, comments)
+  dispatcher_login = "workflow-dispatcher"
+  dispatcher_email = "workflow-dispatcher@${var.email_domain}"
+
+  # Reviewer service account (automated PR review)
+  reviewer_login = "workflow-reviewer"
+  reviewer_email = "workflow-reviewer@${var.email_domain}"
+
+  # Human reviewer account (escalation target)
+  human_login = "you"
+  human_email = "you@${var.email_domain}"
 
   # Workers — add as many as you need
   workers = {
     "worker-alpha" = { email = "worker-alpha@${var.email_domain}" }
     "worker-beta"  = { email = "worker-beta@${var.email_domain}" }
+    "worker-gamma" = { email = "worker-gamma@${var.email_domain}" }
   }
-
-  # URL Forgejo uses to reach the sidecar (docker service name in compose)
-  sidecar_url = var.sidecar_url
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────

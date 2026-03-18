@@ -11,8 +11,10 @@ pub enum JobState {
     OnDeck,
     OnTheStack,
     InReview,
+    Rework,
     Done,
     Failed,
+    Revoked,
 }
 
 impl JobState {
@@ -23,8 +25,10 @@ impl JobState {
             "status:on-deck"      => Some(Self::OnDeck),
             "status:on-the-stack" => Some(Self::OnTheStack),
             "status:in-review"    => Some(Self::InReview),
+            "status:rework"       => Some(Self::Rework),
             "status:done"         => Some(Self::Done),
             "status:failed"       => Some(Self::Failed),
+            "status:revoked"      => Some(Self::Revoked),
             _                     => None,
         }
     }
@@ -36,13 +40,15 @@ impl JobState {
             Self::OnDeck     => "status:on-deck",
             Self::OnTheStack => "status:on-the-stack",
             Self::InReview   => "status:in-review",
+            Self::Rework     => "status:rework",
             Self::Done       => "status:done",
             Self::Failed     => "status:failed",
+            Self::Revoked    => "status:revoked",
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Done)
+        matches!(self, Self::Done | Self::Revoked)
     }
 }
 
@@ -63,6 +69,9 @@ pub struct Job {
     pub priority: u32,
     /// Timeout override in seconds. None = use sidecar default.
     pub timeout_secs: Option<u64>,
+    /// Required capabilities from `capability:X` labels. Empty = any worker.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 impl Job {
@@ -149,6 +158,22 @@ pub struct FactoryListResponse {
     pub factories: Vec<FactoryStatus>,
 }
 
+// ── User info ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInfo {
+    pub login: String,
+    #[serde(default)]
+    pub full_name: String,
+    #[serde(default)]
+    pub avatar_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserListResponse {
+    pub users: Vec<UserInfo>,
+}
+
 // ── API: request / response types ────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -212,6 +237,150 @@ pub struct JobResponse {
 pub struct DepsResponse {
     pub dependencies: Vec<Job>,
     pub all_done: bool,
+}
+
+// ── Transition events ────────────────────────────────────────────────────
+
+/// Published to "workflow.jobs.transition" when the sidecar detects or
+/// causes a state change.  This is a derived notification stream — the
+/// graph and Forgejo labels remain the sources of truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobTransition {
+    pub job: Job,
+    /// `None` when the job is first seen (new vertex in graph).
+    pub previous_state: Option<JobState>,
+    pub new_state: JobState,
+}
+
+// ── Dispatch types ───────────────────────────────────────────────────────
+
+/// Worker announces itself to the dispatcher with its capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRegistration {
+    pub worker_id: String,
+    pub capabilities: Vec<String>,
+}
+
+/// Worker signals it is ready for a new assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdleEvent {
+    pub worker_id: String,
+}
+
+/// Dispatcher pushes a job assignment to a specific worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Assignment {
+    pub job: Job,
+    pub claim: ClaimState,
+    #[serde(default)]
+    pub is_rework: bool,
+}
+
+/// Dispatcher tells a worker to yield its current job for a higher-priority one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreemptNotice {
+    pub reason: String,
+    pub new_job: Job,
+}
+
+/// Worker publishes a heartbeat to NATS so the dispatcher can forward it
+/// to the coordinator without the worker needing an HTTP client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerHeartbeat {
+    pub worker_id: String,
+    pub job_key: String,
+}
+
+/// The result a worker reports after executing a job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum OutcomeReport {
+    Complete,
+    Fail { reason: String, logs: Option<String> },
+    Abandon,
+}
+
+/// Worker reports the outcome of an assigned job via NATS.
+/// The dispatcher handles claim release, state transitions, and Forgejo sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerOutcome {
+    pub worker_id: String,
+    pub job_key: String,
+    pub outcome: OutcomeReport,
+}
+
+// ── Dispatch observability ───────────────────────────────────────────────────
+
+/// Current state of a worker in the dispatcher's registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerState {
+    Idle,
+    Busy,
+    Transitioning,
+}
+
+/// Snapshot of a registered worker's status, exposed via `GET /dispatch/workers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerInfo {
+    pub worker_id: String,
+    pub state: WorkerState,
+    pub capabilities: Vec<String>,
+    pub current_job_key: Option<String>,
+    pub current_job_priority: Option<u32>,
+    pub last_seen: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerListResponse {
+    pub workers: Vec<WorkerInfo>,
+}
+
+/// A single dispatcher journal entry — records an action the dispatcher took.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalEntry {
+    pub timestamp: DateTime<Utc>,
+    pub action: String,
+    pub comment: String,
+    /// Job key if the action relates to a specific job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_key: Option<String>,
+    /// Worker involved, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JournalResponse {
+    pub entries: Vec<JournalEntry>,
+}
+
+// ── CDC: issue snapshot from database ────────────────────────────────────────
+
+/// A fully denormalized issue snapshot produced by the CDC process.
+/// One message per changed issue, published to the NATS stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueSnapshot {
+    /// Forgejo internal issue ID (globally unique across repos).
+    pub issue_id: u64,
+    /// Repository owner username.
+    pub repo_owner: String,
+    /// Repository name.
+    pub repo_name: String,
+    /// Issue number within the repo (the human-visible `#N`).
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub is_closed: bool,
+    /// True if a merged PR in the same repo references `Closes #N` for this issue.
+    #[serde(default)]
+    pub closed_by_merge: bool,
+    /// Label names attached to this issue.
+    pub labels: Vec<String>,
+    /// Assignee login names.
+    pub assignees: Vec<String>,
+    /// Unix timestamp of the last update (used as stream position).
+    pub updated_unix: i64,
 }
 
 // ── Forgejo webhook payload ───────────────────────────────────────────────────
@@ -294,6 +463,14 @@ pub fn parse_timeout(labels: &[ForgejoLabel]) -> Option<u64> {
     None
 }
 
+/// Parse `capability:X` labels, returning all capability tags.
+pub fn parse_capabilities(labels: &[ForgejoLabel]) -> Vec<String> {
+    labels
+        .iter()
+        .filter_map(|l| l.name.strip_prefix("capability:").map(|s| s.trim().to_string()))
+        .collect()
+}
+
 /// Parse dep issue numbers from an issue body.
 ///
 /// Convention: `<!-- workflow:deps:1,2,3 -->` anywhere in the body.
@@ -350,8 +527,10 @@ mod tests {
             JobState::OnDeck,
             JobState::OnTheStack,
             JobState::InReview,
+            JobState::Rework,
             JobState::Done,
             JobState::Failed,
+            JobState::Revoked,
         ] {
             assert_eq!(JobState::from_label(state.label()), Some(state));
         }
@@ -361,5 +540,25 @@ mod tests {
     fn test_claim_timeout() {
         let claim = ClaimState::new("worker-1".into(), 3600);
         assert!(!claim.is_timed_out());
+    }
+
+    #[test]
+    fn test_parse_capabilities() {
+        let labels = vec![
+            ForgejoLabel { id: 1, name: "capability:rust".into(), color: String::new() },
+            ForgejoLabel { id: 2, name: "capability:frontend".into(), color: String::new() },
+            ForgejoLabel { id: 3, name: "status:on-deck".into(), color: String::new() },
+        ];
+        let mut caps = parse_capabilities(&labels);
+        caps.sort();
+        assert_eq!(caps, vec!["frontend", "rust"]);
+    }
+
+    #[test]
+    fn test_parse_capabilities_empty() {
+        let labels: Vec<ForgejoLabel> = vec![
+            ForgejoLabel { id: 1, name: "status:on-deck".into(), color: String::new() },
+        ];
+        assert!(parse_capabilities(&labels).is_empty());
     }
 }

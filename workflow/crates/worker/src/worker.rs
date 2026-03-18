@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use workflow_types::Job;
 
 use crate::client::SidecarClient;
@@ -11,7 +12,8 @@ use crate::forgejo::ForgejoClient;
 /// The result of executing a job.
 ///
 /// Workers return this from `execute` to indicate what should happen next.
-/// The [`WorkerLoop`] converts each variant into the appropriate sidecar call.
+/// The loop (pull-based or dispatched) converts each variant into the
+/// appropriate lifecycle action.
 #[derive(Debug)]
 pub enum Outcome {
     /// Job finished successfully; transition to `in-review`.
@@ -25,6 +27,17 @@ pub enum Outcome {
     Abandon,
 }
 
+// ── Execution context ────────────────────────────────────────────────────────
+
+/// Context passed alongside [`Worker::execute`] in dispatched mode.
+///
+/// Bundles the forgejo client with a cancellation token that fires when
+/// the dispatcher preempts this worker for a higher-priority job.
+pub struct ExecutionContext {
+    pub forgejo: ForgejoClient,
+    pub cancellation: CancellationToken,
+}
+
 // ── Worker trait ──────────────────────────────────────────────────────────────
 
 /// Core trait for agents that execute jobs.
@@ -35,6 +48,14 @@ pub enum Outcome {
 pub trait Worker: Send + Sync {
     /// Unique identifier for this worker instance, used for claims and assignees.
     fn worker_id(&self) -> &str;
+
+    /// Capability tags this worker supports (e.g. `["rust", "frontend"]`).
+    ///
+    /// Used by the dispatcher to match workers to jobs with `capability:X` labels.
+    /// Default: empty (accepts any job regardless of capability requirements).
+    fn capabilities(&self) -> Vec<String> {
+        vec![]
+    }
 
     /// Return `false` to skip a job without claiming it.
     ///
@@ -47,13 +68,13 @@ pub trait Worker: Send + Sync {
     /// Execute a claimed job.
     ///
     /// - The claim is already held when this is called.
-    /// - The [`WorkerLoop`] maintains a background heartbeat task for the
-    ///   duration of this call; do **not** send heartbeats manually.
+    /// - The loop maintains a background heartbeat task for the duration of
+    ///   this call; do **not** send heartbeats manually.
+    /// - Use `forgejo` for content operations (comments, branches, PRs).
     /// - Return [`Outcome::Complete`], [`Outcome::Fail`], or [`Outcome::Abandon`].
     async fn execute(
         &self,
         job: &Job,
-        sidecar: &SidecarClient,
         forgejo: &ForgejoClient,
     ) -> Result<Outcome>;
 }
@@ -61,6 +82,9 @@ pub trait Worker: Send + Sync {
 // ── WorkerLoop ────────────────────────────────────────────────────────────────
 
 /// Runs the claim–heartbeat–outcome lifecycle for a [`Worker`].
+///
+/// This is the pull-based worker loop. For dispatcher-driven operation, use
+/// [`crate::dispatch::DispatchedWorkerLoop`].
 pub struct WorkerLoop<W> {
     worker: W,
     sidecar: SidecarClient,
@@ -139,7 +163,7 @@ impl<W: Worker> WorkerLoop<W> {
 
         let outcome = self
             .worker
-            .execute(&job, &self.sidecar, &self.forgejo)
+            .execute(&job, &self.forgejo)
             .await;
 
         let _ = hb_cancel.send(()); // stop heartbeat

@@ -39,18 +39,36 @@ variable "repo_private" {
 # ── Sidecar service account ───────────────────────────────────────────────────
 
 variable "sidecar_login" {
-  description = "Username for the sidecar service account."
+  description = "Username for the sync service account (label/dep management)."
   type        = string
-  default     = "workflow-sidecar"
+  default     = "workflow-sync"
 }
 
 variable "sidecar_email" {
-  description = "Email address for the sidecar service account."
+  description = "Email address for the sync service account."
   type        = string
 }
 
 variable "sidecar_password" {
-  description = "Password for the sidecar service account. Auto-generated if empty."
+  description = "Password for the sync service account. Auto-generated if empty."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "dispatcher_login" {
+  description = "Username for the dispatcher service account (assignees/comments)."
+  type        = string
+  default     = "workflow-dispatcher"
+}
+
+variable "dispatcher_email" {
+  description = "Email address for the dispatcher service account."
+  type        = string
+}
+
+variable "dispatcher_password" {
+  description = "Password for the dispatcher service account. Auto-generated if empty."
   type        = string
   default     = ""
   sensitive   = true
@@ -79,12 +97,42 @@ variable "worker_default_password" {
   sensitive   = true
 }
 
-# ── Webhook ───────────────────────────────────────────────────────────────────
+# ── Reviewer service account ─────────────────────────────────────────────────
 
-variable "sidecar_url" {
-  description = <<-EOT
-    URL Forgejo uses to POST webhooks to the sidecar.
-    The module appends "/webhook" automatically.
-  EOT
-  type = string
+variable "reviewer_login" {
+  description = "Username for the automated reviewer service account."
+  type        = string
+  default     = "workflow-reviewer"
+}
+
+variable "reviewer_email" {
+  description = "Email address for the reviewer service account."
+  type        = string
+}
+
+variable "reviewer_password" {
+  description = "Password for the reviewer service account. Auto-generated if empty."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+# ── Human reviewer ───────────────────────────────────────────────────────────
+
+variable "human_login" {
+  description = "Username for the human reviewer account."
+  type        = string
+  default     = "you"
+}
+
+variable "human_email" {
+  description = "Email address for the human reviewer account."
+  type        = string
+}
+
+variable "human_password" {
+  description = "Password for the human reviewer account. Auto-generated if empty."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
