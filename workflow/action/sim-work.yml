@@ -1,0 +1,135 @@
+# Forgejo Action: simulated agent work (test harness)
+#
+# Does the same thing as SimWorker but via Forgejo Actions — creates a branch,
+# commits a file, opens a PR, waits a bit, then completes (or fails 10% of the
+# time). Use this to test the ActionWorker → Forgejo Actions pipeline without
+# hitting Claude.
+
+name: Sim Work
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to work on"
+        required: true
+      runner_label:
+        description: "Runner label (ignored by sim, here for parity)"
+        required: false
+        default: "ubuntu-latest"
+      forgejo_url:
+        description: "Forgejo instance URL"
+        required: false
+      delay_secs:
+        description: "Seconds to simulate work"
+        required: false
+        default: "10"
+
+jobs:
+  work:
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 10
+
+    env:
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      FORGEJO_URL: ${{ inputs.forgejo_url || github.server_url }}
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      DELAY_SECS: ${{ inputs.delay_secs }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch issue title
+        id: issue
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          ISSUE_URL="${FORGEJO_URL}/api/v1/repos/${REPO_OWNER}/${REPO_NAME}/issues/${ISSUE_NUMBER}"
+          TITLE=$(curl -sf \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            "${ISSUE_URL}" | jq -r '.title // "untitled"')
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Maybe fail (10% chance)
+        id: dice
+        run: |
+          ROLL=$((RANDOM % 10))
+          echo "roll=${ROLL}" >> "$GITHUB_OUTPUT"
+          if [ "${ROLL}" -eq 0 ]; then
+            echo "::warning::Dice roll: ${ROLL} — this run will fail"
+            echo "should_fail=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Dice roll: ${ROLL} — proceeding normally"
+            echo "should_fail=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail early if unlucky
+        if: steps.dice.outputs.should_fail == 'true'
+        run: |
+          echo "::error::Simulated random failure (10% chance)"
+          exit 1
+
+      - name: Create work branch
+        id: branch
+        run: |
+          BRANCH="work/action/${ISSUE_NUMBER}"
+          git checkout -b "${BRANCH}" || git checkout "${BRANCH}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Simulate work
+        env:
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+        run: |
+          mkdir -p work
+          cat > "work/${ISSUE_NUMBER}.md" <<EOF
+          # ${ISSUE_TITLE}
+
+          Worker: action-runner (sim-work)
+          Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Run ID: ${GITHUB_RUN_ID}
+          EOF
+
+          echo "Simulating work for ${DELAY_SECS}s ..."
+          sleep "${DELAY_SECS}"
+
+      - name: Commit and push
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          git config user.name "sim-action"
+          git config user.email "sim-action@workflow.local"
+          git add -A
+          git commit -m "work: ${{ steps.issue.outputs.title }} (#${ISSUE_NUMBER})"
+          git push origin "${{ steps.branch.outputs.branch }}" --force
+
+      - name: Create pull request
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+        run: |
+          PR_BODY="Closes #${ISSUE_NUMBER}
+
+          Simulated work by action runner (run ${GITHUB_RUN_ID})."
+
+          EXISTING=$(curl -sf \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            "${FORGEJO_URL}/api/v1/repos/${REPO_OWNER}/${REPO_NAME}/pulls?state=open&head=${REPO_OWNER}:${{ steps.branch.outputs.branch }}" \
+            | jq 'length')
+
+          if [ "${EXISTING}" = "0" ]; then
+            curl -sf -X POST \
+              -H "Authorization: token ${FORGEJO_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg title "${ISSUE_TITLE}" \
+                --arg body "${PR_BODY}" \
+                --arg head "${{ steps.branch.outputs.branch }}" \
+                --arg base "main" \
+                '{title: $title, body: $body, head: $head, base: $base}')" \
+              "${FORGEJO_URL}/api/v1/repos/${REPO_OWNER}/${REPO_NAME}/pulls"
+            echo "::notice::PR created for issue #${ISSUE_NUMBER}"
+          else
+            echo "::notice::PR already exists, pushed update"
+          fi

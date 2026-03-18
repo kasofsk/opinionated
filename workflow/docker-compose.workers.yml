@@ -1,14 +1,16 @@
 # Worker containers — start after init.sh has set up Forgejo + sidecar.
 #
-# Usage:
-#   ./scripts/workers.sh              # creates tokens, starts all 3 workers
-#   ./scripts/workers.sh --count 2    # start only 2 workers
-#   ./scripts/workers.sh --down       # stop workers
+# Two modes:
+#   Sim workers:    ./scripts/workers.sh              (default)
+#   Action workers: ./scripts/workers.sh --action     (triggers Forgejo Actions)
 #
-# Each worker authenticates as its Forgejo user and connects to NATS
-# for dispatched job execution.
+# In action mode, each worker gets a paired act_runner container that executes
+# the dispatched workflow. The runner label matches the worker name so each
+# worker's actions run on "their" runner.
 
 services:
+
+  # ── Sim workers (default) ──────────────────────────────────────────────────
 
   worker-aria:
     image: workflow-worker:latest
@@ -24,6 +26,7 @@ services:
       FORGEJO_TOKEN: ${WORKER_ARIA_TOKEN}
     depends_on: []
     restart: unless-stopped
+    profiles: [sim]
 
   worker-blake:
     image: workflow-worker:latest
@@ -39,6 +42,7 @@ services:
       FORGEJO_TOKEN: ${WORKER_BLAKE_TOKEN}
     depends_on: []
     restart: unless-stopped
+    profiles: [sim]
 
   worker-casey:
     image: workflow-worker:latest
@@ -54,6 +58,126 @@ services:
       FORGEJO_TOKEN: ${WORKER_CASEY_TOKEN}
     depends_on: []
     restart: unless-stopped
+    profiles: [sim]
+
+  # ── Action workers + paired runners ────────────────────────────────────────
+  #
+  # Each action-X worker triggers Forgejo Actions workflows.
+  # Each runner-X container is a self-hosted act_runner that picks up those jobs.
+  # The runner label matches the worker name (e.g. worker-aria runs on runner-aria).
+
+  action-aria:
+    image: workflow-worker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command:
+      - action
+      - --nats-url=nats://nats:4222
+      - --runner=worker-aria
+      - --workflow=${ACTION_WORKFLOW:-sim-work.yml}
+    environment:
+      WORKER_ID: worker-aria
+      FORGEJO_URL: http://forgejo:3000
+      FORGEJO_TOKEN: ${WORKER_ARIA_TOKEN}
+    depends_on:
+      runner-aria:
+        condition: service_started
+    restart: unless-stopped
+    profiles: [action]
+
+  runner-aria:
+    image: gitea/act_runner:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner-aria-data:/data
+      - ./infra/runner/config.yaml:/config.yaml:ro
+    environment:
+      GITEA_INSTANCE_URL: http://forgejo:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${RUNNER_REGISTRATION_TOKEN}
+      GITEA_RUNNER_NAME: runner-aria
+      GITEA_RUNNER_LABELS: "worker-aria:docker://workflow-runner-env:latest,ubuntu-latest:docker://workflow-runner-env:latest"
+      CONFIG_FILE: /config.yaml
+    depends_on: []
+    restart: unless-stopped
+    profiles: [action]
+
+  action-blake:
+    image: workflow-worker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command:
+      - action
+      - --nats-url=nats://nats:4222
+      - --runner=worker-blake
+      - --workflow=${ACTION_WORKFLOW:-sim-work.yml}
+    environment:
+      WORKER_ID: worker-blake
+      FORGEJO_URL: http://forgejo:3000
+      FORGEJO_TOKEN: ${WORKER_BLAKE_TOKEN}
+    depends_on:
+      runner-blake:
+        condition: service_started
+    restart: unless-stopped
+    profiles: [action]
+
+  runner-blake:
+    image: gitea/act_runner:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner-blake-data:/data
+      - ./infra/runner/config.yaml:/config.yaml:ro
+    environment:
+      GITEA_INSTANCE_URL: http://forgejo:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${RUNNER_REGISTRATION_TOKEN}
+      GITEA_RUNNER_NAME: runner-blake
+      GITEA_RUNNER_LABELS: "worker-blake:docker://workflow-runner-env:latest,ubuntu-latest:docker://workflow-runner-env:latest"
+      CONFIG_FILE: /config.yaml
+    depends_on: []
+    restart: unless-stopped
+    profiles: [action]
+
+  action-casey:
+    image: workflow-worker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command:
+      - action
+      - --nats-url=nats://nats:4222
+      - --runner=worker-casey
+      - --workflow=${ACTION_WORKFLOW:-sim-work.yml}
+    environment:
+      WORKER_ID: worker-casey
+      FORGEJO_URL: http://forgejo:3000
+      FORGEJO_TOKEN: ${WORKER_CASEY_TOKEN}
+    depends_on:
+      runner-casey:
+        condition: service_started
+    restart: unless-stopped
+    profiles: [action]
+
+  runner-casey:
+    image: gitea/act_runner:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner-casey-data:/data
+      - ./infra/runner/config.yaml:/config.yaml:ro
+    environment:
+      GITEA_INSTANCE_URL: http://forgejo:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${RUNNER_REGISTRATION_TOKEN}
+      GITEA_RUNNER_NAME: runner-casey
+      GITEA_RUNNER_LABELS: "worker-casey:docker://workflow-runner-env:latest,ubuntu-latest:docker://workflow-runner-env:latest"
+      CONFIG_FILE: /config.yaml
+    depends_on: []
+    restart: unless-stopped
+    profiles: [action]
+
+volumes:
+  runner-aria-data:
+  runner-blake-data:
+  runner-casey-data:
 
 networks:
   default:

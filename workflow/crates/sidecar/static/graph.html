@@ -252,6 +252,148 @@
   }
   #detail-close:hover { color: #fff; }
 
+  #new-issue-btn {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    color: #c8ccd4;
+    padding: 5px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #new-issue-btn:hover { background: rgba(255,255,255,0.14); }
+
+  #new-issue-panel {
+    position: fixed;
+    top: 104px; right: 0;
+    width: 420px;
+    height: calc(100vh - 104px);
+    background: rgba(14, 18, 28, 0.95);
+    backdrop-filter: blur(16px);
+    border-left: 1px solid rgba(255,255,255,0.06);
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    z-index: 95;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  #new-issue-panel.open { transform: translateX(0); }
+
+  #new-issue-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    flex-shrink: 0;
+  }
+  #new-issue-panel-header span {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e2e6ed;
+  }
+  #new-issue-panel-close {
+    background: none; border: none;
+    color: rgba(255,255,255,0.4);
+    font-size: 20px;
+    cursor: pointer;
+  }
+  #new-issue-panel-close:hover { color: #fff; }
+
+  #new-issue-form {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    flex: 1;
+  }
+
+  #new-issue-form label {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.5);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  #new-issue-form .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  #new-issue-title, #new-issue-body {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    color: #e2e6ed;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    resize: vertical;
+  }
+  #new-issue-title:focus, #new-issue-body:focus {
+    border-color: rgba(100, 160, 255, 0.4);
+  }
+  #new-issue-body { min-height: 120px; }
+
+  #new-issue-labels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+
+  .ni-label-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid rgba(255,255,255,0.1);
+    transition: all 0.15s ease;
+    user-select: none;
+  }
+  .ni-label-chip .ni-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .ni-label-chip.selected {
+    border-color: rgba(100, 160, 255, 0.5);
+    background: rgba(100, 160, 255, 0.12);
+  }
+
+  #new-issue-submit {
+    background: #2563eb;
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    margin-top: auto;
+  }
+  #new-issue-submit:hover { background: #1d4ed8; }
+  #new-issue-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #new-issue-status {
+    font-size: 12px;
+    text-align: center;
+    min-height: 18px;
+  }
+  #new-issue-status.error { color: #e74c3c; }
+  #new-issue-status.success { color: #2ecc71; }
+
   #detail h2 {
     font-size: 15px;
     font-weight: 600;
@@ -560,6 +702,7 @@
     <option value="">Loading…</option>
   </select>
   <input id="repo-filter" type="text" placeholder="Filter repos…" style="width:140px">
+  <button id="new-issue-btn" onclick="toggleNewIssuePanel()">+ New Issue</button>
   <div class="legend">
     <div class="legend-item"><span class="legend-dot" style="background:#2ecc71"></span> on-deck</div>
     <div class="legend-item"><span class="legend-dot" style="background:#e4a84a"></span> blocked</div>
@@ -589,6 +732,29 @@
 <div id="detail">
   <button id="detail-close">&times;</button>
   <div id="detail-content"></div>
+</div>
+
+<div id="new-issue-panel">
+  <div id="new-issue-panel-header">
+    <span>New Issue</span>
+    <button id="new-issue-panel-close" onclick="toggleNewIssuePanel()">&times;</button>
+  </div>
+  <div id="new-issue-form">
+    <div class="field">
+      <label>Title</label>
+      <input id="new-issue-title" type="text" placeholder="Issue title">
+    </div>
+    <div class="field">
+      <label>Body</label>
+      <textarea id="new-issue-body" placeholder="Describe the issue…"></textarea>
+    </div>
+    <div class="field">
+      <label>Labels</label>
+      <div id="new-issue-labels">Loading…</div>
+    </div>
+    <div id="new-issue-status"></div>
+    <button id="new-issue-submit" onclick="submitNewIssue()">Create Issue</button>
+  </div>
 </div>
 
 <script>
@@ -1417,6 +1583,93 @@ function populateRepoSelect(filter) {
   if (filtered.includes(prev)) select.value = prev;
 }
 
+let newIssueLabelCache = {};
+
+function toggleNewIssuePanel() {
+  const panel = document.getElementById('new-issue-panel');
+  const isOpen = panel.classList.toggle('open');
+  if (isOpen) {
+    document.getElementById('new-issue-title').value = '';
+    document.getElementById('new-issue-body').value = '';
+    document.getElementById('new-issue-status').textContent = '';
+    loadLabelsForNewIssue();
+  }
+}
+
+async function loadLabelsForNewIssue() {
+  const repo = document.getElementById('repo-select').value;
+  if (!repo) return;
+  const container = document.getElementById('new-issue-labels');
+  container.innerHTML = 'Loading\u2026';
+  try {
+    const [owner, name] = repo.split('/');
+    const resp = await fetch(`/repos/${owner}/${name}/labels`);
+    const data = await resp.json();
+    newIssueLabelCache = {};
+    container.innerHTML = '';
+    for (const label of data.labels) {
+      // skip status: labels — those are managed by the sidecar
+      if (label.name.startsWith('status:')) continue;
+      newIssueLabelCache[label.id] = label;
+      const chip = document.createElement('span');
+      chip.className = 'ni-label-chip';
+      chip.dataset.id = label.id;
+      const color = label.color.startsWith('#') ? label.color : `#${label.color}`;
+      chip.innerHTML = `<span class="ni-dot" style="background:${color}"></span>${label.name}`;
+      chip.onclick = () => chip.classList.toggle('selected');
+      container.appendChild(chip);
+    }
+    if (container.children.length === 0) {
+      container.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:12px">No labels available</span>';
+    }
+  } catch (e) {
+    container.innerHTML = '<span style="color:#e74c3c;font-size:12px">Failed to load labels</span>';
+  }
+}
+
+async function submitNewIssue() {
+  const repo = document.getElementById('repo-select').value;
+  if (!repo) return;
+  const title = document.getElementById('new-issue-title').value.trim();
+  const body = document.getElementById('new-issue-body').value;
+  const statusEl = document.getElementById('new-issue-status');
+  const btn = document.getElementById('new-issue-submit');
+
+  if (!title) {
+    statusEl.className = 'error';
+    statusEl.textContent = 'Title is required';
+    return;
+  }
+
+  const selectedLabels = [...document.querySelectorAll('.ni-label-chip.selected')]
+    .map(el => Number(el.dataset.id));
+
+  btn.disabled = true;
+  statusEl.className = '';
+  statusEl.textContent = 'Creating\u2026';
+
+  try {
+    const [owner, name] = repo.split('/');
+    const resp = await fetch(`/repos/${owner}/${name}/issues`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, body, labels: selectedLabels }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    statusEl.className = 'success';
+    statusEl.textContent = `Created #${data.number}`;
+    document.getElementById('new-issue-title').value = '';
+    document.getElementById('new-issue-body').value = '';
+    document.querySelectorAll('.ni-label-chip.selected').forEach(el => el.classList.remove('selected'));
+  } catch (e) {
+    statusEl.className = 'error';
+    statusEl.textContent = `Error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function showSelectedRepo() {
   const repo = document.getElementById('repo-select').value;
   if (!repo) return;
@@ -1477,19 +1730,28 @@ document.getElementById('detail-close').addEventListener('click', () => {
     const repo = document.getElementById('repo-select').value;
     if (!repo || !cy) return;
     const filtered = allJobs.filter(j => `${j.repo_owner}/${j.repo_name}` === repo);
-    for (const j of filtered) {
-      const node = cy.getElementById(jobKey(j));
-      if (node && node.length) {
-        const col = STATE_COLORS[j.state] || STATE_COLORS.blocked;
-        node.data('state', j.state);
-        node.data('color', col.bg);
-        node.data('glow', col.glow);
-        node.data('job', j);
 
-        // Update avatar badge
-        const assignee = (j.assignees || [])[0];
-        const assigneeUser = assignee ? allUsers.find(u => u.login === assignee) : null;
-        node.data('avatarUrl', assigneeUser ? assigneeUser.avatar_url : null);
+    // Detect new or removed jobs — full re-render if graph structure changed
+    const currentNodeIds = new Set(cy.nodes().map(n => n.id()));
+    const newJobIds = new Set(filtered.map(jobKey));
+    const hasNewNodes = filtered.some(j => !currentNodeIds.has(jobKey(j)));
+    const hasRemovedNodes = [...currentNodeIds].some(id => !newJobIds.has(id));
+
+    if (hasNewNodes || hasRemovedNodes) {
+      // Structural change — rebuild the full graph
+      populateRepoSelect(document.getElementById('repo-filter').value.trim());
+      renderGraph(filtered);
+    } else {
+      // Just update existing node data in place
+      for (const j of filtered) {
+        const node = cy.getElementById(jobKey(j));
+        if (node && node.length) {
+          const col = STATE_COLORS[j.state] || STATE_COLORS.blocked;
+          node.data('state', j.state);
+          node.data('color', col.bg);
+          node.data('glow', col.glow);
+          node.data('job', j);
+        }
       }
     }
     // Update roster: claim counts + dispatch state

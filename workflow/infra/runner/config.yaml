@@ -1,0 +1,16 @@
+# act_runner configuration template.
+# Copied into each runner container's data volume during registration.
+
+log:
+  level: info
+
+runner:
+  capacity: 1
+  timeout: 30m
+
+container:
+  # Job containers join the workflow network so they can reach forgejo:3000
+  network: "workflow_default"
+  privileged: false
+  options:
+  valid_volumes: []

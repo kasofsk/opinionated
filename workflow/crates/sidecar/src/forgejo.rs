@@ -83,6 +83,65 @@ impl ForgejoClient {
         Ok(resp.json().await?)
     }
 
+    // ── Issue creation ─────────────────────────────────────────────────────────
+
+    pub async fn create_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[u64],
+    ) -> Result<u64> {
+        #[derive(Serialize)]
+        struct CreateBody<'a> {
+            title: &'a str,
+            body: &'a str,
+            #[serde(skip_serializing_if = "<[u64]>::is_empty")]
+            labels: &'a [u64],
+        }
+        #[derive(Deserialize)]
+        struct Created {
+            number: u64,
+        }
+        let url = self.api(&format!("/repos/{owner}/{repo}/issues"));
+        let resp: Created = self
+            .http
+            .post(&url)
+            .header("Authorization", self.auth())
+            .json(&CreateBody { title, body, labels })
+            .send()
+            .await
+            .context("create issue")?
+            .error_for_status()
+            .context("create issue response")?
+            .json()
+            .await?;
+        Ok(resp.number)
+    }
+
+    // ── Label listing ────────────────────────────────────────────────────────
+
+    pub async fn list_labels(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<ForgejoLabel>> {
+        let url = self.api(&format!("/repos/{owner}/{repo}/labels?limit=50"));
+        let labels: Vec<ForgejoLabel> = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .context("list labels")?
+            .error_for_status()
+            .context("list labels response")?
+            .json()
+            .await?;
+        Ok(labels)
+    }
+
     // ── Label management ──────────────────────────────────────────────────────
 
     /// Look up a label by name, creating it if absent. Returns the label ID.

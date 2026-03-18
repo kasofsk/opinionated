@@ -90,6 +90,28 @@ enum Cmd {
         delay_secs: u64,
     },
 
+    /// Run an action worker that triggers Forgejo Actions workflows for each job
+    Action {
+        /// NATS server URL
+        #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4223")]
+        nats_url: String,
+        /// Workflow filename to dispatch (e.g. "agent-work.yml")
+        #[arg(long, env = "ACTION_WORKFLOW", default_value = "agent-work.yml")]
+        workflow: String,
+        /// Runner label this worker targets (only accepts jobs with matching runner:X label)
+        #[arg(long, env = "ACTION_RUNNER")]
+        runner: Option<String>,
+        /// Git ref to dispatch the workflow on
+        #[arg(long, default_value = "main")]
+        git_ref: String,
+        /// Poll interval in seconds when waiting for the action run to complete
+        #[arg(long, default_value = "10")]
+        poll_secs: u64,
+        /// Maximum time in seconds to wait for an action run before failing
+        #[arg(long, default_value = "3600")]
+        timeout_secs: u64,
+    },
+
     /// Seed a Forgejo repo with jobs from a fixture file
     Seed {
         /// owner/repo to create issues in
@@ -173,6 +195,31 @@ async fn main() -> Result<()> {
             println!(
                 "Starting sim worker '{}' (delay={}s, nats={})",
                 args.worker_id, delay_secs, nats_url
+            );
+            loop_.run().await
+        }
+
+        Cmd::Action { nats_url, workflow, runner, git_ref, poll_secs, timeout_secs } => {
+            let worker = ActionWorker::new(
+                args.worker_id.clone(),
+                workflow.clone(),
+                runner.clone(),
+                git_ref.clone(),
+                *poll_secs,
+                *timeout_secs,
+            );
+            let runner_desc = runner.as_deref().unwrap_or("any");
+            let loop_ = DispatchedWorkerLoop::new(
+                worker,
+                &args.forgejo_url,
+                &args.forgejo_token,
+                nats_url,
+                Duration::from_secs(args.heartbeat_secs),
+            )
+            .await?;
+            println!(
+                "Starting action worker '{}' (workflow={}, runner={}, nats={})",
+                args.worker_id, workflow, runner_desc, nats_url
             );
             loop_.run().await
         }
@@ -332,60 +379,73 @@ async fn cmd_seed(
 
     println!("Seeding \"{}\" into {owner}/{repo} …", fixture.name);
 
-    // Phase 1 — create all issues without dep markers so each gets a real number.
-    // Wait for the sidecar to pick up each issue via webhook before proceeding.
+    // Fetch repo labels so we can apply status labels at issue creation time.
+    let repo_labels = forgejo.list_repo_labels(owner, repo).await?;
+    let blocked_label_id = repo_labels.iter().find(|l| l.name == "status:blocked").map(|l| l.id);
+    let on_deck_label_id = repo_labels.iter().find(|l| l.name == "status:on-deck").map(|l| l.id);
+
+    // Single pass — create each issue with deps and labels in one shot.
+    // Fixtures are DAGs so all dep IDs have already been created by the time
+    // we reach a job that depends on them.
     let mut id_to_number: HashMap<String, u64> = HashMap::new();
 
     for job in &fixture.jobs {
-        let tmp_body = if job.body.is_empty() {
+        // Resolve dep IDs → issue numbers (all known since deps reference earlier jobs).
+        let dep_numbers: Vec<u64> = job
+            .depends_on
+            .iter()
+            .filter_map(|dep_id| {
+                let n = id_to_number.get(dep_id).copied();
+                if n.is_none() {
+                    eprintln!("warning: unknown dep id '{dep_id}' in job '{}'", job.id);
+                }
+                n
+            })
+            .collect();
+
+        // Build body with dep marker included from the start.
+        let base_body = if job.body.is_empty() {
             job.title.clone()
         } else {
             job.body.clone()
         };
-
-        let number = forgejo.create_issue(owner, repo, &job.title, &tmp_body).await?;
-        println!("  #{number}  {}", job.title);
-        id_to_number.insert(job.id.clone(), number);
-
-        // Wait for sidecar to acknowledge this issue via webhook.
-        wait_for_job(&sidecar, owner, repo, number).await?;
-    }
-
-    // Phase 2 — patch each issue body to inject the `<!-- workflow:deps:... -->` marker.
-    // Wait after each edit to confirm the sidecar synced the dependency edges.
-    for job in &fixture.jobs {
-        if job.depends_on.is_empty() {
-            continue;
-        }
-
-        let dep_numbers: Vec<String> = job
-            .depends_on
-            .iter()
-            .map(|dep_id: &String| {
-                id_to_number
-                    .get(dep_id)
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| {
-                        eprintln!("warning: unknown dep id '{dep_id}' in job '{}'", job.id);
-                        dep_id.clone()
-                    })
-            })
-            .collect();
-
-        let number = *id_to_number.get(&job.id).unwrap();
-        let dep_marker = format!("<!-- workflow:deps:{} -->", dep_numbers.join(","));
-
-        let new_body = if job.body.is_empty() {
-            dep_marker
+        let body = if dep_numbers.is_empty() {
+            base_body
         } else {
-            format!("{}\n\n{dep_marker}", job.body)
+            let dep_csv: Vec<String> = dep_numbers.iter().map(|n| n.to_string()).collect();
+            let dep_links: Vec<String> = dep_numbers.iter().map(|n| format!("- #{n}")).collect();
+            format!(
+                "{base_body}\n\n## Dependencies\n\n{}\n\n<!-- workflow:deps:{} -->",
+                dep_links.join("\n"),
+                dep_csv.join(","),
+            )
         };
 
-        forgejo.edit_issue_body(owner, repo, number, &new_body).await?;
+        // Apply initial status label: on-deck if no deps, blocked if has deps.
+        let label_ids: Vec<u64> = if dep_numbers.is_empty() {
+            on_deck_label_id.into_iter().collect()
+        } else {
+            blocked_label_id.into_iter().collect()
+        };
 
-        let expected_deps: Vec<u64> = dep_numbers.iter().filter_map(|s| s.parse().ok()).collect();
-        wait_for_deps(&sidecar, owner, repo, number, &expected_deps).await?;
-        println!("  #{number}  deps → [{}]", dep_numbers.join(", "));
+        let number = forgejo
+            .create_issue_with_labels(owner, repo, &job.title, &body, &label_ids)
+            .await?;
+
+        if dep_numbers.is_empty() {
+            println!("  #{number}  {}", job.title);
+        } else {
+            let dep_str: Vec<String> = dep_numbers.iter().map(|n| format!("#{n}")).collect();
+            println!("  #{number}  {} (deps: {})", job.title, dep_str.join(", "));
+        }
+
+        id_to_number.insert(job.id.clone(), number);
+
+        // Wait for sidecar to acknowledge this issue and its deps.
+        wait_for_job(&sidecar, owner, repo, number).await?;
+        if !dep_numbers.is_empty() {
+            wait_for_deps(&sidecar, owner, repo, number, &dep_numbers).await?;
+        }
     }
 
     println!("Done. {} issues created.", fixture.jobs.len());
@@ -544,6 +604,155 @@ impl Worker for SimWorker {
         tokio::time::sleep(Duration::from_secs(self.delay_secs)).await;
         tracing::info!(key = %job.key(), "sim complete");
         Ok(Outcome::Complete)
+    }
+}
+
+// ── ActionWorker ──────────────────────────────────────────────────────────────
+
+struct ActionWorker {
+    worker_id: String,
+    workflow: String,
+    runner: Option<String>,
+    git_ref: String,
+    poll_secs: u64,
+    timeout_secs: u64,
+}
+
+impl ActionWorker {
+    fn new(
+        worker_id: String,
+        workflow: String,
+        runner: Option<String>,
+        git_ref: String,
+        poll_secs: u64,
+        timeout_secs: u64,
+    ) -> Self {
+        Self { worker_id, workflow, runner, git_ref, poll_secs, timeout_secs }
+    }
+}
+
+#[async_trait]
+impl Worker for ActionWorker {
+    fn worker_id(&self) -> &str {
+        &self.worker_id
+    }
+
+    async fn execute(
+        &self,
+        job: &Job,
+        forgejo: &ForgejoClient,
+    ) -> Result<Outcome> {
+        let runner_label = self.runner.as_deref().unwrap_or("ubuntu-latest");
+
+        tracing::info!(
+            key = %job.key(),
+            title = %job.title,
+            runner = runner_label,
+            workflow = %self.workflow,
+            "dispatching action"
+        );
+
+        // Build workflow dispatch inputs.
+        let mut inputs = std::collections::HashMap::new();
+        inputs.insert("issue_number".to_string(), job.number.to_string());
+        inputs.insert("runner_label".to_string(), runner_label.to_string());
+        inputs.insert("forgejo_url".to_string(),
+            std::env::var("FORGEJO_URL").unwrap_or_default());
+
+        // Dispatch the workflow.
+        forgejo
+            .dispatch_workflow(
+                &job.repo_owner,
+                &job.repo_name,
+                &self.workflow,
+                &self.git_ref,
+                &inputs,
+            )
+            .await?;
+
+        tracing::info!(key = %job.key(), "workflow dispatched, polling for run");
+
+        // Brief pause then find the new run.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Find the run that was just created.
+        let run_id = self.find_new_run(forgejo, job).await?;
+
+        tracing::info!(key = %job.key(), run_id, "tracking action run");
+
+        // Poll until the run completes or we time out.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.timeout_secs);
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Ok(Outcome::Fail {
+                    reason: format!("action run {run_id} timed out after {}s", self.timeout_secs),
+                    logs: None,
+                });
+            }
+
+            tokio::time::sleep(Duration::from_secs(self.poll_secs)).await;
+
+            let run = forgejo
+                .get_action_run(&job.repo_owner, &job.repo_name, run_id)
+                .await?;
+
+            if run.is_completed() {
+                if run.is_success() {
+                    tracing::info!(key = %job.key(), run_id, "action run succeeded");
+                    return Ok(Outcome::Complete);
+                } else {
+                    let reason = format!(
+                        "action run {run_id} finished with status={}",
+                        run.status,
+                    );
+                    tracing::warn!(key = %job.key(), run_id, %reason, "action run failed");
+                    return Ok(Outcome::Fail { reason, logs: None });
+                }
+            }
+
+            tracing::debug!(
+                key = %job.key(),
+                run_id,
+                status = %run.status,
+                "action still running"
+            );
+        }
+    }
+}
+
+impl ActionWorker {
+    /// Find the run we just dispatched by matching issue_number in the payload.
+    /// Prefers a non-completed run; falls back to the newest matching run.
+    async fn find_new_run(
+        &self,
+        forgejo: &ForgejoClient,
+        job: &Job,
+    ) -> Result<u64> {
+        for _ in 0..15 {
+            let runs = forgejo
+                .list_action_runs(&job.repo_owner, &job.repo_name)
+                .await?;
+
+            // Find runs matching our issue number.
+            let matching: Vec<_> = runs
+                .workflow_runs
+                .iter()
+                .filter(|r| r.issue_number() == Some(job.number))
+                .collect();
+
+            // Prefer a run that's still in progress.
+            if let Some(run) = matching.iter().find(|r| !r.is_completed()) {
+                return Ok(run.id);
+            }
+            // Otherwise take the newest matching run (highest ID = just created).
+            if let Some(run) = matching.iter().max_by_key(|r| r.id) {
+                return Ok(run.id);
+            }
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        bail!("timed out waiting for action run for issue #{}", job.number)
     }
 }
 

@@ -83,22 +83,25 @@ impl Dispatcher {
                         continue;
                     }
                 };
-                let caps_str = if reg.capabilities.is_empty() {
-                    "none".to_string()
-                } else {
-                    reg.capabilities.join(", ")
-                };
-                dispatcher.state.journal(
-                    "register",
-                    &format!("Worker registered with capabilities: [{caps_str}]"),
-                    None,
-                    Some(&reg.worker_id),
-                ).await;
-                tracing::info!(
-                    worker_id = %reg.worker_id,
-                    capabilities = ?reg.capabilities,
-                    "worker registered"
-                );
+                let already_registered = dispatcher.state.dispatch_registry.contains_key(&reg.worker_id);
+                if !already_registered {
+                    let caps_str = if reg.capabilities.is_empty() {
+                        "none".to_string()
+                    } else {
+                        reg.capabilities.join(", ")
+                    };
+                    dispatcher.state.journal(
+                        "register",
+                        &format!("Worker registered with capabilities: [{caps_str}]"),
+                        None,
+                        Some(&reg.worker_id),
+                    ).await;
+                    tracing::info!(
+                        worker_id = %reg.worker_id,
+                        capabilities = ?reg.capabilities,
+                        "worker registered"
+                    );
+                }
                 let now = Utc::now();
                 dispatcher.state.dispatch_registry.insert(
                     reg.worker_id.clone(),

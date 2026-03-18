@@ -351,7 +351,7 @@ mod tests {
             priority: 50,
             timeout_secs: None,
             capabilities: vec![],
-        }
+            }
     }
 
     #[test]

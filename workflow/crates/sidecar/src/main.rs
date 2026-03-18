@@ -139,6 +139,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/factories/:name/poll", post(api::poll_factory))
         // Users
         .route("/repos/:owner/:repo/users", get(api::list_users))
+        // Labels & issue creation
+        .route("/repos/:owner/:repo/labels", get(api::list_labels))
+        .route("/repos/:owner/:repo/issues", post(api::create_issue))
         // Dispatch observability
         .route("/dispatch/workers", get(api::list_dispatch_workers))
         .route("/dispatch/journal", get(api::get_dispatch_journal))

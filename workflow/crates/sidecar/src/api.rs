@@ -6,10 +6,10 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 use workflow_types::{
-    AbandonRequest, ClaimRequest, ClaimResponse, CompleteRequest, DepsResponse,
-    FailRequest, FactoryListResponse, HeartbeatRequest, Job, JobListResponse,
-    JobResponse, JobState, JobTransition, JournalResponse, RequeueRequest, RequeueTarget,
-    UserListResponse, WorkerListResponse,
+    AbandonRequest, ClaimRequest, ClaimResponse, CompleteRequest, CreateIssueRequest,
+    CreateIssueResponse, DepsResponse, FailRequest, FactoryListResponse, HeartbeatRequest,
+    Job, JobListResponse, JobResponse, JobState, JobTransition, JournalResponse,
+    LabelListResponse, RequeueRequest, RequeueTarget, UserListResponse, WorkerListResponse,
 };
 
 use crate::error::AppError;
@@ -308,6 +308,30 @@ pub async fn list_users(
 ) -> Result<Json<UserListResponse>> {
     let users = s.forgejo.get_repo_collaborators(&owner, &repo).await?;
     Ok(Json(UserListResponse { users }))
+}
+
+// ── Labels ───────────────────────────────────────────────────────────────────
+
+pub async fn list_labels(
+    State(s): State<Arc<AppState>>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<LabelListResponse>> {
+    let labels = s.forgejo.list_labels(&owner, &repo).await?;
+    Ok(Json(LabelListResponse { labels }))
+}
+
+// ── Issue creation ───────────────────────────────────────────────────────────
+
+pub async fn create_issue(
+    State(s): State<Arc<AppState>>,
+    Path((owner, repo)): Path<(String, String)>,
+    Json(req): Json<CreateIssueRequest>,
+) -> Result<Json<CreateIssueResponse>> {
+    let number = s
+        .forgejo
+        .create_issue(&owner, &repo, &req.title, &req.body, &req.labels)
+        .await?;
+    Ok(Json(CreateIssueResponse { number }))
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────

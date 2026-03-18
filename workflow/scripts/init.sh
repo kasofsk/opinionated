@@ -70,6 +70,7 @@ echo "✓ Processes stopped"
 
 echo "🗑  Tearing down containers and clearing state ..."
 docker compose down -v 2>/dev/null || true
+docker compose -f docker-compose.workers.yml --profile sim --profile action down -v 2>/dev/null || true
 rm -rf .data/forgejo .data/workflow.db
 mkdir -p .data/forgejo/gitea/conf
 cp infra/forgejo/app.ini .data/forgejo/gitea/conf/app.ini
@@ -255,13 +256,48 @@ LISTEN_ADDR=0.0.0.0:8080
 EOF
 echo "✓ Wrote .sidecar.env"
 
-# ── 10. Build ────────────────────────────────────────────────────────────────
+# ── 10. Push workflow files to repo ────────────────────────────────────────
+
+echo "📄 Pushing workflow files to repo ..."
+REPO_OWNER="${REPO_OWNER:-sysadmin}"
+REPO_NAME="${REPO_NAME:-workflow-test}"
+
+for wf in action/sim-work.yml action/agent-work.yml; do
+    fname=$(basename "$wf")
+    target_path=".forgejo/workflows/$fname"
+    wf_content=$(base64 < "$wf")
+
+    # Check if file exists (get its sha for update)
+    existing_sha=$(curl -sf \
+        -H "Authorization: token $ADMIN_TOKEN" \
+        "$FORGEJO_URL/api/v1/repos/$REPO_OWNER/$REPO_NAME/contents/$target_path" \
+        2>/dev/null | grep -o '"sha":"[^"]*"' | cut -d'"' -f4 || true)
+
+    if [[ -n "$existing_sha" ]]; then
+        curl -sf -X PUT \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"$wf_content\",\"message\":\"update $fname\",\"sha\":\"$existing_sha\"}" \
+            "$FORGEJO_URL/api/v1/repos/$REPO_OWNER/$REPO_NAME/contents/$target_path" \
+            > /dev/null
+    else
+        curl -sf -X POST \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"$wf_content\",\"message\":\"add $fname workflow\"}" \
+            "$FORGEJO_URL/api/v1/repos/$REPO_OWNER/$REPO_NAME/contents/$target_path" \
+            > /dev/null
+    fi
+    echo "  ✓ $target_path"
+done
+
+# ── 11. Build ────────────────────────────────────────────────────────────────
 
 echo "🔨 Building binaries ..."
 cargo build -p workflow-sidecar -p workflow-cdc -p worker-cli 2>&1 | grep -v "^$" | tail -3
 echo "✓ Build complete"
 
-# ── 11. Start CDC + sidecar ─────────────────────────────────────────────────
+# ── 12. Start CDC + sidecar ─────────────────────────────────────────────────
 
 echo "🚀 Starting CDC process ..."
 FORGEJO_DB_PATH="$ROOT/.data/forgejo/gitea/gitea.db" \
@@ -287,7 +323,7 @@ done
 curl -sf http://localhost:8080/jobs > /dev/null 2>&1 || { echo "❌ Sidecar did not start"; exit 1; }
 echo "✓ Sidecar is up"
 
-# ── 12. Seed fixture ────────────────────────────────────────────────────────
+# ── 13. Seed fixture ────────────────────────────────────────────────────────
 
 if [[ "$SEED" == "true" ]]; then
     echo "🌱 Seeding fixture: $FIXTURE ..."

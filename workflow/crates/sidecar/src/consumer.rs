@@ -127,7 +127,9 @@ async fn process_snapshot(state: &Arc<AppState>, snap: &IssueSnapshot) -> Result
     let timeout_secs = parse_timeout(&labels);
     let capabilities = parse_capabilities(&labels);
 
-    let on_ice = snap.labels.iter().any(|l| l == "status:on-ice");
+    let has_status_label = snap.labels.iter().any(|l| JobState::from_label(l).is_some());
+    let on_ice = snap.labels.iter().any(|l| l == "status:on-ice")
+        || (!snap.is_closed && !has_status_label);
 
     // Determine what state this issue should be in.
     let has_done_label = snap.labels.iter().any(|l| l == "status:done");
@@ -258,13 +260,23 @@ async fn process_snapshot(state: &Arc<AppState>, snap: &IssueSnapshot) -> Result
                 new_state: resolved,
             }).await;
         }
-    } else if previous_state.as_ref() != Some(&target_state) {
-        // Claimed / terminal / on-ice state changed — publish transition.
-        state.coord.publish_transition(&JobTransition {
-            job: job.clone(),
-            previous_state,
-            new_state: target_state,
-        }).await;
+    } else {
+        // Claimed / terminal / on-ice — sync label if missing (e.g. issue created with no labels).
+        let forgejo_state = snap.labels.iter().find_map(|l| JobState::from_label(l));
+        if forgejo_state.as_ref() != Some(&target_state) {
+            state
+                .forgejo
+                .set_job_state(owner, repo, snap.number, &target_state)
+                .await?;
+        }
+
+        if previous_state.as_ref() != Some(&target_state) {
+            state.coord.publish_transition(&JobTransition {
+                job: job.clone(),
+                previous_state,
+                new_state: target_state,
+            }).await;
+        }
     }
 
     Ok(())

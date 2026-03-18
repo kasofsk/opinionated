@@ -47,6 +47,12 @@ pub struct PullRequest {
     pub merged: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RepoLabel {
+    pub id: u64,
+    pub name: String,
+}
+
 #[derive(Deserialize)]
 pub struct ChangedFile {
     pub filename: String,
@@ -103,10 +109,24 @@ impl ForgejoClient {
         title: &str,
         body: &str,
     ) -> Result<u64> {
+        self.create_issue_with_labels(owner, repo, title, body, &[]).await
+    }
+
+    /// Create a new issue with labels (by ID) and return its issue number.
+    pub async fn create_issue_with_labels(
+        &self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[u64],
+    ) -> Result<u64> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
             title: &'a str,
             body: &'a str,
+            #[serde(skip_serializing_if = "<[u64]>::is_empty")]
+            labels: &'a [u64],
         }
         #[derive(serde::Deserialize)]
         struct Created {
@@ -117,7 +137,7 @@ impl ForgejoClient {
             .http
             .post(&url)
             .header("Authorization", self.auth())
-            .json(&Body { title, body })
+            .json(&Body { title, body, labels })
             .send()
             .await
             .context("create issue")?
@@ -126,6 +146,27 @@ impl ForgejoClient {
             .json()
             .await?;
         Ok(resp.number)
+    }
+
+    /// List all labels defined on a repository.
+    pub async fn list_repo_labels(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<RepoLabel>> {
+        let url = self.api(&format!("/repos/{owner}/{repo}/labels?limit=50"));
+        let labels: Vec<RepoLabel> = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .context("list repo labels")?
+            .error_for_status()
+            .context("list repo labels response")?
+            .json()
+            .await?;
+        Ok(labels)
     }
 
     /// Close an issue (sets state to "closed").
@@ -585,5 +626,130 @@ impl ForgejoClient {
             .json()
             .await?;
         Ok(files)
+    }
+
+    // ── Forgejo Actions API ──────────────────────────────────────────────────
+
+    /// Trigger a workflow via `workflow_dispatch`.
+    pub async fn dispatch_workflow(
+        &self,
+        owner: &str,
+        repo: &str,
+        workflow: &str,
+        git_ref: &str,
+        inputs: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            #[serde(rename = "ref")]
+            git_ref: &'a str,
+            inputs: &'a std::collections::HashMap<String, String>,
+        }
+        let url = self.api(&format!(
+            "/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
+        ));
+        self.http
+            .post(&url)
+            .header("Authorization", self.auth())
+            .json(&Body { git_ref, inputs })
+            .send()
+            .await
+            .context("dispatch workflow")?
+            .error_for_status()
+            .context("dispatch workflow response")?;
+        Ok(())
+    }
+
+    /// List recent action runs for a repository.
+    pub async fn list_action_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<ActionRunList> {
+        let url = self.api(&format!(
+            "/repos/{owner}/{repo}/actions/runs?limit=10"
+        ));
+        let resp: ActionRunList = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .context("list action runs")?
+            .error_for_status()
+            .context("list action runs response")?
+            .json()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Get a specific action run by ID.
+    pub async fn get_action_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> Result<ActionRun> {
+        let url = self.api(&format!(
+            "/repos/{owner}/{repo}/actions/runs/{run_id}"
+        ));
+        let run: ActionRun = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .context("get action run")?
+            .error_for_status()
+            .context("get action run response")?
+            .json()
+            .await?;
+        Ok(run)
+    }
+}
+
+// ── Forgejo Actions types ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ActionRunList {
+    pub workflow_runs: Vec<ActionRun>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionRun {
+    pub id: u64,
+    /// Run status — Forgejo uses "waiting", "running", "success", "failure", "cancelled".
+    pub status: String,
+    /// The event type that triggered this run.
+    #[serde(default)]
+    pub trigger_event: String,
+    /// JSON-encoded event payload containing workflow_dispatch inputs.
+    #[serde(default)]
+    pub event_payload: String,
+    pub created: String,
+    #[serde(default)]
+    pub updated: String,
+    #[serde(default)]
+    pub html_url: Option<String>,
+}
+
+impl ActionRun {
+    /// Returns true if the run has finished (success, failure, or cancelled).
+    pub fn is_completed(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "success" | "failure" | "cancelled"
+        )
+    }
+
+    /// Returns true if the run succeeded.
+    pub fn is_success(&self) -> bool {
+        self.status == "success"
+    }
+
+    /// Extract `issue_number` from the workflow_dispatch event payload inputs.
+    pub fn issue_number(&self) -> Option<u64> {
+        let payload: serde_json::Value = serde_json::from_str(&self.event_payload).ok()?;
+        payload.get("inputs")?.get("issue_number")?.as_str()?.parse().ok()
     }
 }

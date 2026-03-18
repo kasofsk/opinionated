@@ -174,6 +174,25 @@ pub struct UserListResponse {
     pub users: Vec<UserInfo>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LabelListResponse {
+    pub labels: Vec<ForgejoLabel>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateIssueRequest {
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub labels: Vec<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateIssueResponse {
+    pub number: u64,
+}
+
 // ── API: request / response types ────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
