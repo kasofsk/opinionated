@@ -668,7 +668,7 @@
     gap: 3px;
     padding: 2px 7px;
     border-radius: 4px;
-    font-size: 9px;
+    font-size: 8px;
     font-weight: 600;
     text-decoration: none;
     pointer-events: auto;
@@ -1299,12 +1299,6 @@ function buildWidgetHtml(job, key, badge, forgejoBase) {
 
     const issueUrl = `${forgejoBase}/${job.repo_owner}/${job.repo_name}/issues/${job.number}`;
     let linksHtml = `<a class="nw-link" href="${issueUrl}" target="_blank" title="Open issue #${job.number}">Issue</a>`;
-    if (pr) {
-      const prUrl = `${forgejoBase}/${job.repo_owner}/${job.repo_name}/pulls/${pr.number}`;
-      const prClass = pr.merged ? 'pr-merged' : (pr.state === 'open' ? 'pr-open' : 'pr-closed');
-      const prIcon = pr.merged ? '&#10003;' : (pr.state === 'open' ? '&#9679;' : '&#10005;');
-      linksHtml += `<a class="nw-link ${prClass}" href="${prUrl}" target="_blank" title="PR #${pr.number}">${prIcon} PR #${pr.number}</a>`;
-    }
 
     // Action runs matched by issue number (with branch matching as primary)
     {
@@ -1324,6 +1318,13 @@ function buildWidgetHtml(job, key, badge, forgejoBase) {
         const label = (run.workflow_id || 'CI').replace(/\.ya?ml$/, '');
         linksHtml += `<a class="nw-link ${cls}" href="${url}" target="_blank" title="${label}: ${run.status}">${icon} ${label}</a>`;
       }
+    }
+
+    if (pr) {
+      const prUrl = `${forgejoBase}/${job.repo_owner}/${job.repo_name}/pulls/${pr.number}`;
+      const prClass = pr.merged ? 'pr-merged' : (pr.state === 'open' ? 'pr-open' : 'pr-closed');
+      const prIcon = pr.merged ? '&#10003;' : (pr.state === 'open' ? '&#9679;' : '&#10005;');
+      linksHtml += `<a class="nw-link ${prClass}" href="${prUrl}" target="_blank" title="PR #${pr.number}">${prIcon} PR #${pr.number}</a>`;
     }
 
     const isEscalated = escalatedJobs.has(key) && !['done', 'revoked'].includes(job.state);

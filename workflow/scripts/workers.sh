@@ -115,6 +115,28 @@ if [[ "$MODE" == "action" ]]; then
 
 fi
 
+# ── Build images ─────────────────────────────────────────────────────────────
+#
+# Build shared images once before starting services to avoid parallel build
+# races where multiple containers try to create the same image simultaneously.
+
+# workflow-runner-env: the environment image that action runners execute jobs in.
+# Referenced by runner GITEA_RUNNER_LABELS but not built by docker compose.
+if [[ -n "$BUILD_FLAG" ]] || ! docker image inspect workflow-runner-env:latest &>/dev/null; then
+    echo "🔨 Building workflow-runner-env image ..."
+    docker build -t workflow-runner-env:latest -f Dockerfile.runner-env . 2>&1 \
+        | while IFS= read -r line; do printf '\r\033[K  %s' "${line:0:120}"; done; echo
+    echo "✓ workflow-runner-env ready"
+fi
+
+# workflow-worker: the worker binary image shared by all action/sim workers.
+if [[ -n "$BUILD_FLAG" ]] || ! docker image inspect workflow-worker:latest &>/dev/null; then
+    echo "🔨 Building workflow-worker image ..."
+    docker compose -f docker-compose.workers.yml build "${SELECTED[0]}" 2>&1 \
+        | while IFS= read -r line; do printf '\r\033[K  %s' "${line:0:120}"; done; echo
+    echo "✓ workflow-worker ready"
+fi
+
 # ── Launch containers ────────────────────────────────────────────────────────
 
 echo ""
@@ -129,14 +151,14 @@ if [[ "$MODE" == "action" ]]; then
 
     echo "Starting ${#SELECTED[@]} action workers + runners ..."
     env $(cat .workers.env | xargs) \
-        docker compose -f docker-compose.workers.yml --profile action up -d $BUILD_FLAG "${SERVICES[@]}"
+        docker compose -f docker-compose.workers.yml --profile action up -d --no-build "${SERVICES[@]}"
 else
     # Sim mode
     SERVICES=("${SELECTED[@]}")
 
     echo "Starting ${#SERVICES[@]} sim workers (delay=${DELAY_SECS}s) ..."
     env $(cat .workers.env | xargs) \
-        docker compose -f docker-compose.workers.yml --profile sim up -d $BUILD_FLAG "${SERVICES[@]}"
+        docker compose -f docker-compose.workers.yml --profile sim up -d --no-build "${SERVICES[@]}"
 fi
 
 echo ""

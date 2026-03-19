@@ -10,9 +10,10 @@
 #   4. Runs Terraform (destroy + apply) for repos, users, labels
 #   5. Sets worker/sidecar/reviewer passwords, creates API tokens
 #   6. Writes .sidecar.env
-#   7. Builds sidecar Docker image + worker-cli binary
-#   8. Starts CDC + sidecar via docker compose
-#   9. Seeds a fixture and verifies the graph
+#   7. Uploads avatars from infra/avatars/{username}.png
+#   8. Builds sidecar Docker image + worker-cli binary
+#   9. Starts CDC + sidecar via docker compose
+#  10. Seeds a fixture and verifies the graph
 #
 # Usage:
 #   ./scripts/init.sh                       # full setup with default hub fixture
@@ -234,7 +235,49 @@ curl -sf -X PATCH \
     "$FORGEJO_URL/api/v1/admin/users/$HUMAN_LOGIN" > /dev/null
 echo "✓ Human reviewer '$HUMAN_LOGIN' password set"
 
-# ── 8. Write .sidecar.env ───────────────────────────────────────────────────
+# ── 8. Upload avatars ─────────────────────────────────────────────────────
+#
+# Looks for PNG files in infra/avatars/ named {username}.png.
+# Uses each user's credentials to POST to /api/v1/user/avatar.
+
+AVATAR_DIR="$ROOT/infra/avatars"
+if [[ -d "$AVATAR_DIR" ]] && ls "$AVATAR_DIR"/*.png &>/dev/null; then
+    echo "🖼  Uploading avatars ..."
+
+    upload_avatar() {
+        local login="$1" pass="$2" file="$3"
+        local b64
+        b64=$(base64 -i "$file" | tr -d '\n')
+        curl -sf -X POST \
+            -u "$login:$pass" \
+            -H "Content-Type: application/json" \
+            -d "{\"image\": \"$b64\"}" \
+            "$FORGEJO_URL/api/v1/user/avatar" > /dev/null 2>&1 \
+            && echo "  ✓ $login" \
+            || echo "  ⚠ $login (avatar upload failed)"
+    }
+
+    password_for() {
+        case "$1" in
+            "$SIDECAR_LOGIN")    echo "$SIDECAR_PASS" ;;
+            "$DISPATCHER_LOGIN") echo "$DISPATCHER_PASS" ;;
+            "$REVIEWER_LOGIN")   echo "$REVIEWER_PASS" ;;
+            "$HUMAN_LOGIN")      echo "$HUMAN_PASS" ;;
+            "$ADMIN_USER")       echo "$ADMIN_PASS" ;;
+            *)                   echo "$WORKER_PASS" ;;
+        esac
+    }
+
+    for avatar_file in "$AVATAR_DIR"/*.png; do
+        username=$(basename "$avatar_file" .png)
+        upload_avatar "$username" "$(password_for "$username")" "$avatar_file"
+    done
+    echo "✓ Avatars uploaded"
+else
+    echo "⏭  No avatars found in infra/avatars/ (skipping)"
+fi
+
+# ── 9. Write .sidecar.env ─────────────────────────────────────────────────── ───────────────────────────────────────────────────
 #
 # These are consumed by the sidecar Docker container. URLs use Docker
 # service names, not localhost. The docker-compose.yml environment section
@@ -253,7 +296,7 @@ LISTEN_ADDR=0.0.0.0:8080
 EOF
 echo "✓ Wrote .sidecar.env"
 
-# ── 9. Push workflow files to repo ─────────────────────────────────────────
+# ── 10. Push workflow files to repo ─────────────────────────────────────────
 
 echo "📄 Pushing workflow files to repo ..."
 REPO_OWNER="${REPO_OWNER:-sysadmin}"
@@ -288,11 +331,12 @@ for wf in action/sim-work.yml action/agent-work.yml; do
     echo "  ✓ $target_path"
 done
 
-# ── 10. Build + start sidecar + CDC ──────────────────────────────────────
+# ── 11. Build + start sidecar + CDC ──────────────────────────────────────
 
-echo "🔨 Building sidecar image + worker-cli ..."
-docker build -t workflow-sidecar:latest -f Dockerfile.sidecar . 2>&1 | tail -5
-cargo build -p worker-cli 2>&1 | grep -v "^$" | tail -3
+echo "🔨 Building sidecar image ..."
+docker build -t workflow-sidecar:latest -f Dockerfile.sidecar . 2>&1 | while IFS= read -r line; do printf '\r\033[K  %s' "${line:0:120}"; done; echo
+echo "🔨 Building worker-cli ..."
+cargo build -p worker-cli 2>&1 | while IFS= read -r line; do printf '\r\033[K  %s' "${line:0:120}"; done; echo
 echo "✓ Build complete"
 
 echo "🚀 Starting CDC + sidecar ..."
@@ -307,7 +351,7 @@ done
 curl -sf http://localhost:8080/jobs > /dev/null 2>&1 || { echo "❌ Sidecar did not start. Check: docker compose logs sidecar"; exit 1; }
 echo "✓ Sidecar is up"
 
-# ── 11. Seed fixture ───────────────────────────────────────────────────────
+# ── 12. Seed fixture ───────────────────────────────────────────────────────
 
 if [[ "$SEED" == "true" ]]; then
     echo "🌱 Seeding fixture: $FIXTURE ..."
