@@ -25,8 +25,7 @@ impl Config {
         let db_path: PathBuf = std::env::var("FORGEJO_DB_PATH")
             .unwrap_or_else(|_| ".data/forgejo/gitea/gitea.db".into())
             .into();
-        let nats_url =
-            std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4223".into());
+        let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4223".into());
 
         Ok(Self { db_path, nats_url })
     }
@@ -87,10 +86,7 @@ async fn main() -> Result<()> {
     // Debounce: coalesce rapid file events into a single notification.
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
         if let Ok(event) = res {
-            if matches!(
-                event.kind,
-                EventKind::Modify(_) | EventKind::Create(_)
-            ) {
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                 let _ = tx.try_send(());
             }
         }
@@ -280,7 +276,10 @@ fn query_has_open_pr(conn: &Connection, issue_id: u64, issue_number: u64) -> Res
 /// Find issue IDs that have open PRs referencing them but may not have been
 /// re-published yet (because the issue's updated_unix didn't change when the
 /// PR was created). Returns full snapshots for those issues.
-fn query_issues_with_new_prs(conn: &Connection, published_ids: &HashSet<u64>) -> Result<Vec<IssueSnapshot>> {
+fn query_issues_with_new_prs(
+    conn: &Connection,
+    published_ids: &HashSet<u64>,
+) -> Result<Vec<IssueSnapshot>> {
     // Find issues with open PRs that we haven't already published this cycle.
     let mut stmt = conn.prepare_cached(
         "SELECT DISTINCT
@@ -352,7 +351,10 @@ fn query_issues_with_new_prs(conn: &Connection, published_ids: &HashSet<u64>) ->
 
 /// Find closed issues that still have a non-done status label. These need
 /// re-publishing so the consumer can transition them to Done or Revoked.
-fn query_closed_not_done(conn: &Connection, published_ids: &HashSet<u64>) -> Result<Vec<IssueSnapshot>> {
+fn query_closed_not_done(
+    conn: &Connection,
+    published_ids: &HashSet<u64>,
+) -> Result<Vec<IssueSnapshot>> {
     let mut stmt = conn.prepare_cached(
         "SELECT DISTINCT
             i.id,

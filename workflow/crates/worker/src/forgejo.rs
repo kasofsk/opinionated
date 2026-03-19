@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use forgejo_api::apis::configuration::Configuration;
-use reqwest::header;
 use forgejo_api::apis::{issue_api, repository_api};
 use forgejo_api::models;
+use reqwest::header;
 
 /// Forgejo client scoped to content operations safe for workers to perform
 /// after they hold an exclusive claim.
@@ -47,6 +47,19 @@ impl ActionRun {
 // ── Implementation ────────────────────────────────────────────────────────────
 
 impl ForgejoClient {
+    /// Create a client using basic auth (username/password).
+    /// Used for admin operations like creating users.
+    pub fn new_basic_auth(base_url: &str, username: &str, password: &str) -> Self {
+        let base = base_url.trim_end_matches('/');
+        Self {
+            config: Configuration {
+                base_path: format!("{base}/api/v1"),
+                basic_auth: Some((username.to_string(), Some(password.to_string()))),
+                ..Configuration::default()
+            },
+        }
+    }
+
     pub fn new(base_url: &str, token: &str) -> Self {
         let base = base_url.trim_end_matches('/');
         Self {
@@ -81,7 +94,8 @@ impl ForgejoClient {
         title: &str,
         body: &str,
     ) -> Result<u64> {
-        self.create_issue_with_labels(owner, repo, title, body, &[]).await
+        self.create_issue_with_labels(owner, repo, title, body, &[])
+            .await
     }
 
     pub async fn create_issue_with_labels(
@@ -104,23 +118,75 @@ impl ForgejoClient {
         Ok(issue.number.unwrap_or(0) as u64)
     }
 
-    pub async fn list_repo_labels(
+    // ── Admin operations ───────────────────────────────────────────────────
+
+    pub async fn admin_create_user(
+        &self,
+        username: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<()> {
+        use forgejo_api::apis::admin_api;
+        let opts = models::CreateUserOption {
+            username: username.to_string(),
+            email: email.to_string(),
+            password: Some(password.to_string()),
+            must_change_password: Some(false),
+            ..Default::default()
+        };
+        admin_api::admin_create_user(&self.config, Some(opts))
+            .await
+            .context("admin create user")?;
+        Ok(())
+    }
+
+    pub async fn add_issue_labels(
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<RepoLabel>> {
+        number: u64,
+        label_ids: &[u64],
+    ) -> Result<()> {
+        let opts = models::IssueLabelsOption {
+            labels: Some(
+                label_ids
+                    .iter()
+                    .map(|&id| serde_json::Value::from(id as i64))
+                    .collect(),
+            ),
+            updated_at: None,
+        };
+        issue_api::issue_add_label(&self.config, owner, repo, number as i64, Some(opts))
+            .await
+            .context("add issue labels")?;
+        Ok(())
+    }
+
+    pub async fn create_label(
+        &self,
+        owner: &str,
+        repo: &str,
+        name: &str,
+        color: &str,
+    ) -> Result<RepoLabel> {
+        let opts = models::CreateLabelOption {
+            color: color.to_string(),
+            name: name.to_string(),
+            ..Default::default()
+        };
+        issue_api::issue_create_label(&self.config, owner, repo, Some(opts))
+            .await
+            .context("create label")
+    }
+
+    pub async fn list_repo_labels(&self, owner: &str, repo: &str) -> Result<Vec<RepoLabel>> {
         let labels = issue_api::issue_list_labels(&self.config, owner, repo, None, None, Some(50))
             .await
             .context("list repo labels")?;
         Ok(labels)
     }
 
-    pub async fn close_issue(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<()> {
+    pub async fn close_issue(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
         let opts = models::EditIssueOption {
             state: Some("closed".to_string()),
             ..Default::default()
@@ -150,23 +216,13 @@ impl ForgejoClient {
 
     // ── Issue content ─────────────────────────────────────────────────────────
 
-    pub async fn get_issue(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Issue> {
+    pub async fn get_issue(&self, owner: &str, repo: &str, number: u64) -> Result<Issue> {
         issue_api::issue_get_issue(&self.config, owner, repo, number as i64)
             .await
             .context("get issue")
     }
 
-    pub async fn get_issue_body(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<String> {
+    pub async fn get_issue_body(&self, owner: &str, repo: &str, number: u64) -> Result<String> {
         let issue = self.get_issue(owner, repo, number).await?;
         Ok(issue.body.unwrap_or_default())
     }
@@ -177,12 +233,9 @@ impl ForgejoClient {
         repo: &str,
         number: u64,
     ) -> Result<Vec<Comment>> {
-        issue_api::issue_get_comments(
-            &self.config, owner, repo, number as i64,
-            None, None,
-        )
-        .await
-        .context("list comments")
+        issue_api::issue_get_comments(&self.config, owner, repo, number as i64, None, None)
+            .await
+            .context("list comments")
     }
 
     pub async fn post_comment(
@@ -204,11 +257,7 @@ impl ForgejoClient {
 
     // ── Branch operations ─────────────────────────────────────────────────────
 
-    pub async fn list_branches(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<Branch>> {
+    pub async fn list_branches(&self, owner: &str, repo: &str) -> Result<Vec<Branch>> {
         repository_api::repo_list_branches(&self.config, owner, repo, None, None)
             .await
             .context("list branches")
@@ -295,6 +344,16 @@ impl ForgejoClient {
         Ok(())
     }
 
+    pub async fn add_collaborator(&self, owner: &str, repo: &str, username: &str) -> Result<()> {
+        let opts = models::AddCollaboratorOption {
+            permission: Some(models::add_collaborator_option::Permission::Write),
+        };
+        repository_api::repo_add_collaborator(&self.config, owner, repo, username, Some(opts))
+            .await
+            .context("add collaborator")?;
+        Ok(())
+    }
+
     pub async fn delete_repo(&self, owner: &str, repo: &str) -> Result<()> {
         repository_api::repo_delete(&self.config, owner, repo)
             .await
@@ -302,12 +361,7 @@ impl ForgejoClient {
         Ok(())
     }
 
-    pub async fn create_webhook(
-        &self,
-        owner: &str,
-        repo: &str,
-        target_url: &str,
-    ) -> Result<u64> {
+    pub async fn create_webhook(&self, owner: &str, repo: &str, target_url: &str) -> Result<u64> {
         let mut config_map = std::collections::HashMap::new();
         config_map.insert("url".to_string(), target_url.to_string());
         config_map.insert("content_type".to_string(), "json".to_string());
@@ -326,26 +380,24 @@ impl ForgejoClient {
         Ok(hook.id.unwrap_or(0) as u64)
     }
 
-    pub async fn get_pr(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<PullRequest> {
+    pub async fn get_pr(&self, owner: &str, repo: &str, number: u64) -> Result<PullRequest> {
         repository_api::repo_get_pull_request(&self.config, owner, repo, number as i64)
             .await
             .context("get PR")
     }
 
-    pub async fn list_prs(
-        &self,
-        owner: &str,
-        repo: &str,
-        state: &str,
-    ) -> Result<Vec<PullRequest>> {
+    pub async fn list_prs(&self, owner: &str, repo: &str, state: &str) -> Result<Vec<PullRequest>> {
         repository_api::repo_list_pull_requests(
-            &self.config, owner, repo,
-            Some(state), None, None, None, None, None, Some(50),
+            &self.config,
+            owner,
+            repo,
+            Some(state),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(50),
         )
         .await
         .context("list PRs")
@@ -364,11 +416,9 @@ impl ForgejoClient {
             event: Some(event.to_string()),
             ..Default::default()
         };
-        repository_api::repo_create_pull_review(
-            &self.config, owner, repo, pr_number as i64, opts,
-        )
-        .await
-        .context("submit review")?;
+        repository_api::repo_create_pull_review(&self.config, owner, repo, pr_number as i64, opts)
+            .await
+            .context("submit review")?;
         Ok(())
     }
 
@@ -389,7 +439,11 @@ impl ForgejoClient {
             ..Default::default()
         };
         repository_api::repo_merge_pull_request(
-            &self.config, owner, repo, pr_number as i64, Some(opts),
+            &self.config,
+            owner,
+            repo,
+            pr_number as i64,
+            Some(opts),
         )
         .await
         .context("merge PR")?;
@@ -408,7 +462,11 @@ impl ForgejoClient {
             ..Default::default()
         };
         repository_api::repo_create_pull_review_requests(
-            &self.config, owner, repo, pr_number as i64, opts,
+            &self.config,
+            owner,
+            repo,
+            pr_number as i64,
+            opts,
         )
         .await
         .context("add PR reviewer")?;
@@ -422,8 +480,14 @@ impl ForgejoClient {
         pr_number: u64,
     ) -> Result<Vec<ChangedFile>> {
         repository_api::repo_get_pull_request_files(
-            &self.config, owner, repo, pr_number as i64,
-            None, None, None, None,
+            &self.config,
+            owner,
+            repo,
+            pr_number as i64,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .context("list PR files")
@@ -445,48 +509,44 @@ impl ForgejoClient {
             r#ref: git_ref.to_string(),
             return_run_info: Some(true),
         };
-        let result = repository_api::dispatch_workflow(
-            &self.config, owner, repo, workflow, Some(opts),
-        )
-        .await
-        .context("dispatch workflow")?;
+        let result =
+            repository_api::dispatch_workflow(&self.config, owner, repo, workflow, Some(opts))
+                .await
+                .context("dispatch workflow")?;
         Ok(result.id.map(|id| id as u64))
     }
 
     /// List recent action runs for a repository.
-    pub async fn list_action_runs(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<ActionRun>> {
+    pub async fn list_action_runs(&self, owner: &str, repo: &str) -> Result<Vec<ActionRun>> {
         let resp = repository_api::list_action_runs(
-            &self.config, owner, repo,
-            None, Some(10),
+            &self.config,
+            owner,
+            repo,
+            None,
+            Some(10),
             Some(vec!["workflow_dispatch".to_string()]),
-            None, None, None,
+            None,
+            None,
+            None,
         )
         .await
         .context("list action runs")?;
-        Ok(resp.workflow_runs.unwrap_or_default().iter().map(|r| {
-            ActionRun {
+        Ok(resp
+            .workflow_runs
+            .unwrap_or_default()
+            .iter()
+            .map(|r| ActionRun {
                 id: r.id.unwrap_or(0) as u64,
                 status: r.status.clone().unwrap_or_default(),
-            }
-        }).collect())
+            })
+            .collect())
     }
 
     /// Get a specific action run by ID.
-    pub async fn get_action_run(
-        &self,
-        owner: &str,
-        repo: &str,
-        run_id: u64,
-    ) -> Result<ActionRun> {
-        let r = repository_api::action_run(
-            &self.config, owner, repo, run_id as i64,
-        )
-        .await
-        .context("get action run")?;
+    pub async fn get_action_run(&self, owner: &str, repo: &str, run_id: u64) -> Result<ActionRun> {
+        let r = repository_api::action_run(&self.config, owner, repo, run_id as i64)
+            .await
+            .context("get action run")?;
         Ok(ActionRun {
             id: r.id.unwrap_or(0) as u64,
             status: r.status.unwrap_or_default(),

@@ -83,19 +83,25 @@ impl Dispatcher {
                         continue;
                     }
                 };
-                let already_registered = dispatcher.state.dispatch_registry.contains_key(&reg.worker_id);
+                let already_registered = dispatcher
+                    .state
+                    .dispatch_registry
+                    .contains_key(&reg.worker_id);
                 if !already_registered {
                     let caps_str = if reg.capabilities.is_empty() {
                         "none".to_string()
                     } else {
                         reg.capabilities.join(", ")
                     };
-                    dispatcher.state.journal(
-                        "register",
-                        &format!("Worker registered with capabilities: [{caps_str}]"),
-                        None,
-                        Some(&reg.worker_id),
-                    ).await;
+                    dispatcher
+                        .state
+                        .journal(
+                            "register",
+                            &format!("Worker registered with capabilities: [{caps_str}]"),
+                            None,
+                            Some(&reg.worker_id),
+                        )
+                        .await;
                     tracing::info!(
                         worker_id = %reg.worker_id,
                         capabilities = ?reg.capabilities,
@@ -266,9 +272,15 @@ impl Dispatcher {
             // Guard: verify all declared deps are actually Done. The graph may
             // mark a job on-deck before CDC has synced all dependency edges.
             if !job.dependency_numbers.is_empty() {
-                let deps_ok = self.state.graph.all_declared_deps_done(
-                    &job.repo_owner, &job.repo_name, &job.dependency_numbers,
-                ).unwrap_or(false);
+                let deps_ok = self
+                    .state
+                    .graph
+                    .all_declared_deps_done(
+                        &job.repo_owner,
+                        &job.repo_name,
+                        &job.dependency_numbers,
+                    )
+                    .unwrap_or(false);
                 if !deps_ok {
                     tracing::debug!(
                         job_key = %job.key(),
@@ -294,7 +306,9 @@ impl Dispatcher {
             };
 
             // Transition state and set assignee to the worker's Forgejo user.
-            self.state.graph.set_state(&job.key(), &JobState::OnTheStack)?;
+            self.state
+                .graph
+                .set_state(&job.key(), &JobState::OnTheStack)?;
             self.state
                 .forgejo
                 .set_job_state(
@@ -338,15 +352,18 @@ impl Dispatcher {
                 .await
                 .context("publish assignment")?;
 
-            self.state.journal(
-                "assign",
-                &format!(
-                    "Assigned {} (priority {}) to worker",
-                    job.key(), job.priority
-                ),
-                Some(&job.key()),
-                Some(worker_id),
-            ).await;
+            self.state
+                .journal(
+                    "assign",
+                    &format!(
+                        "Assigned {} (priority {}) to worker",
+                        job.key(),
+                        job.priority
+                    ),
+                    Some(&job.key()),
+                    Some(worker_id),
+                )
+                .await;
 
             tracing::info!(
                 worker_id,
@@ -367,7 +384,11 @@ impl Dispatcher {
         if let Some(mut entry) = self.state.dispatch_registry.get_mut(&hb.worker_id) {
             entry.last_seen = Utc::now();
         }
-        let ok = self.state.coord.heartbeat(&hb.job_key, &hb.worker_id).await?;
+        let ok = self
+            .state
+            .coord
+            .heartbeat(&hb.job_key, &hb.worker_id)
+            .await?;
         if !ok {
             tracing::warn!(
                 worker_id = %hb.worker_id,
@@ -400,12 +421,14 @@ impl Dispatcher {
                     .forgejo
                     .set_job_state(owner, repo, number, &JobState::InReview)
                     .await?;
-                self.state.journal(
-                    "complete",
-                    &format!("Worker completed job → in-review"),
-                    Some(key),
-                    Some(&wo.worker_id),
-                ).await;
+                self.state
+                    .journal(
+                        "complete",
+                        &format!("Worker completed job → in-review"),
+                        Some(key),
+                        Some(&wo.worker_id),
+                    )
+                    .await;
                 tracing::info!(
                     worker_id = %wo.worker_id,
                     job_key = key,
@@ -420,7 +443,10 @@ impl Dispatcher {
                     *entry += 1;
                     *entry
                 };
-                let max_retries = self.state.graph.get_job(key)?
+                let max_retries = self
+                    .state
+                    .graph
+                    .get_job(key)?
                     .map(|j| j.max_retries)
                     .unwrap_or(3);
 
@@ -445,12 +471,14 @@ impl Dispatcher {
                         .forgejo
                         .set_job_state(owner, repo, number, &JobState::OnDeck)
                         .await?;
-                    self.state.journal(
-                        "retry",
-                        &format!("Attempt {attempt}/{max_retries} failed: {reason} — retrying"),
-                        Some(key),
-                        Some(&wo.worker_id),
-                    ).await;
+                    self.state
+                        .journal(
+                            "retry",
+                            &format!("Attempt {attempt}/{max_retries} failed: {reason} — retrying"),
+                            Some(key),
+                            Some(&wo.worker_id),
+                        )
+                        .await;
                     tracing::warn!(
                         worker_id = %wo.worker_id,
                         job_key = key,
@@ -467,12 +495,14 @@ impl Dispatcher {
                         .forgejo
                         .set_job_state(owner, repo, number, &JobState::Failed)
                         .await?;
-                    self.state.journal(
-                        "fail",
-                        &format!("All {max_retries} retries exhausted: {reason}"),
-                        Some(key),
-                        Some(&wo.worker_id),
-                    ).await;
+                    self.state
+                        .journal(
+                            "fail",
+                            &format!("All {max_retries} retries exhausted: {reason}"),
+                            Some(key),
+                            Some(&wo.worker_id),
+                        )
+                        .await;
                     tracing::error!(
                         worker_id = %wo.worker_id,
                         job_key = key,
@@ -490,12 +520,14 @@ impl Dispatcher {
                     .forgejo
                     .set_job_state(owner, repo, number, &JobState::OnDeck)
                     .await?;
-                self.state.journal(
-                    "abandon",
-                    &format!("Worker abandoned job → on-deck"),
-                    Some(key),
-                    Some(&wo.worker_id),
-                ).await;
+                self.state
+                    .journal(
+                        "abandon",
+                        &format!("Worker abandoned job → on-deck"),
+                        Some(key),
+                        Some(&wo.worker_id),
+                    )
+                    .await;
                 tracing::info!(
                     worker_id = %wo.worker_id,
                     job_key = key,
@@ -507,12 +539,14 @@ impl Dispatcher {
                 // Worker is done but state transition is delegated to an
                 // external signal (e.g. CDC detecting a PR). Just release
                 // the claim — don't touch the job state or Forgejo labels.
-                self.state.journal(
-                    "yield",
-                    &format!("Worker yielded — awaiting external transition"),
-                    Some(key),
-                    Some(&wo.worker_id),
-                ).await;
+                self.state
+                    .journal(
+                        "yield",
+                        &format!("Worker yielded — awaiting external transition"),
+                        Some(key),
+                        Some(&wo.worker_id),
+                    )
+                    .await;
                 tracing::info!(
                     worker_id = %wo.worker_id,
                     job_key = key,
@@ -532,11 +566,14 @@ impl Dispatcher {
 
         // Publish transition event for other reactors.
         if let Ok(Some(job)) = self.state.graph.get_job(key) {
-            self.state.coord.publish_transition(&JobTransition {
-                job,
-                previous_state: Some(JobState::OnTheStack),
-                new_state,
-            }).await;
+            self.state
+                .coord
+                .publish_transition(&JobTransition {
+                    job,
+                    previous_state: Some(JobState::OnTheStack),
+                    new_state,
+                })
+                .await;
         }
 
         Ok(())
@@ -607,7 +644,10 @@ impl Dispatcher {
 
                 if let Some(ref worker_id) = original_worker {
                     // Check if the original worker is currently idle.
-                    let is_idle = self.state.dispatch_registry.get(worker_id)
+                    let is_idle = self
+                        .state
+                        .dispatch_registry
+                        .get(worker_id)
                         .map(|e| matches!(e.state, WorkerState::Idle))
                         .unwrap_or(false);
 
@@ -616,13 +656,17 @@ impl Dispatcher {
                         self.try_assign_rework(worker_id, &t.job).await?;
                     } else {
                         // Worker is busy — queue for when it becomes idle.
-                        self.state.pending_reworks.insert(job_key.clone(), worker_id.clone());
-                        self.state.journal(
-                            "rework",
-                            &format!("Rework queued for worker {worker_id} (currently busy)"),
-                            Some(&job_key),
-                            Some(worker_id),
-                        ).await;
+                        self.state
+                            .pending_reworks
+                            .insert(job_key.clone(), worker_id.clone());
+                        self.state
+                            .journal(
+                                "rework",
+                                &format!("Rework queued for worker {worker_id} (currently busy)"),
+                                Some(&job_key),
+                                Some(worker_id),
+                            )
+                            .await;
                         tracing::info!(
                             job_key = %job_key,
                             worker_id = %worker_id,
@@ -663,8 +707,14 @@ impl Dispatcher {
     async fn try_assign_rework(&self, worker_id: &str, job: &workflow_types::Job) -> Result<()> {
         let job_key = job.key();
 
-        let timeout = job.timeout_secs.unwrap_or(self.state.config.default_timeout_secs);
-        let claim = self.state.coord.try_claim(&job_key, worker_id.to_string(), timeout).await?;
+        let timeout = job
+            .timeout_secs
+            .unwrap_or(self.state.config.default_timeout_secs);
+        let claim = self
+            .state
+            .coord
+            .try_claim(&job_key, worker_id.to_string(), timeout)
+            .await?;
         let claim = match claim {
             Some(c) => c,
             None => {
@@ -673,10 +723,17 @@ impl Dispatcher {
             }
         };
 
-        self.state.graph.set_state(&job_key, &JobState::OnTheStack)?;
+        self.state
+            .graph
+            .set_state(&job_key, &JobState::OnTheStack)?;
         self.state
             .forgejo
-            .set_job_state(&job.repo_owner, &job.repo_name, job.number, &JobState::OnTheStack)
+            .set_job_state(
+                &job.repo_owner,
+                &job.repo_name,
+                job.number,
+                &JobState::OnTheStack,
+            )
             .await?;
         // Assignee is already set from the original work cycle — no need to re-set.
 
@@ -704,12 +761,14 @@ impl Dispatcher {
 
         self.state.pending_reworks.remove(&job_key);
 
-        self.state.journal(
-            "rework",
-            &format!("Re-assigned {} to original worker for rework", job_key),
-            Some(&job_key),
-            Some(worker_id),
-        ).await;
+        self.state
+            .journal(
+                "rework",
+                &format!("Re-assigned {} to original worker for rework", job_key),
+                Some(&job_key),
+                Some(worker_id),
+            )
+            .await;
 
         tracing::info!(
             worker_id,
@@ -754,8 +813,7 @@ impl Dispatcher {
         for entry in self.state.dispatch_registry.iter() {
             if matches!(entry.state, WorkerState::Busy) {
                 if let Some(priority) = entry.current_job_priority {
-                    if priority < new_priority
-                        && capabilities_match(required, &entry.capabilities)
+                    if priority < new_priority && capabilities_match(required, &entry.capabilities)
                     {
                         match &best {
                             None => best = Some((entry.worker_id.clone(), priority)),

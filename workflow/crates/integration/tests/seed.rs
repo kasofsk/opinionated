@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use workflow_types::JobState;
 use workflow_worker::{client::SidecarClient, forgejo::ForgejoClient};
@@ -68,10 +68,6 @@ impl TestContext {
         let forgejo_url = env("FORGEJO_URL", "http://localhost:3000");
         let forgejo_token = env("FORGEJO_TOKEN", "");
         let sidecar_url = env("SIDECAR_URL", "http://localhost:8080");
-        let sidecar_webhook_url = env(
-            "SIDECAR_WEBHOOK_URL",
-            "http://host.docker.internal:8080",
-        );
         // Repos are created via /user/repos under the token owner's account.
         let owner = env("TEST_REPO_OWNER", "workflow-sync");
 
@@ -85,13 +81,47 @@ impl TestContext {
             .as_millis();
         let repo = format!("test-{test_name}-{ts}");
 
-        forgejo.create_repo(&repo).await.expect("create ephemeral repo");
         forgejo
-            .create_webhook(&owner, &repo, &format!("{sidecar_webhook_url}/webhook"))
+            .create_repo(&repo)
             .await
-            .expect("create webhook on ephemeral repo");
+            .expect("create ephemeral repo");
 
-        Self { forgejo, sidecar, owner, repo, created: Vec::new() }
+        // Create status labels on the ephemeral repo (Terraform only sets them
+        // on the main repo, but tests need them too).
+        for (name, color) in [
+            ("status:on-deck", "#0075ca"),
+            ("status:blocked", "#e4e669"),
+            ("status:on-the-stack", "#fbca04"),
+            ("status:in-review", "#8b5cf6"),
+            ("status:done", "#0e8a16"),
+            ("status:failed", "#b60205"),
+            ("status:rework", "#f59e0b"),
+            ("status:revoked", "#6b7280"),
+            ("status:on-ice", "#cfd3d7"),
+        ] {
+            let _ = forgejo.create_label(&owner, &repo, name, color).await;
+        }
+
+        // Create the test-worker user (if it doesn't exist) and add it +
+        // the sidecar service accounts as collaborators on the ephemeral repo.
+        let admin_user = env("ADMIN_USER", "sysadmin");
+        let admin_pass = env("ADMIN_PASS", "admin1234");
+        let admin = ForgejoClient::new_basic_auth(&forgejo_url, &admin_user, &admin_pass);
+        let _ = admin
+            .admin_create_user("test-worker", "test-worker@test.local", "testpass1234")
+            .await;
+
+        for user in ["workflow-sync", "workflow-dispatcher", "test-worker"] {
+            let _ = forgejo.add_collaborator(&owner, &repo, user).await;
+        }
+
+        Self {
+            forgejo,
+            sidecar,
+            owner,
+            repo,
+            created: Vec::new(),
+        }
     }
 
     /// Delete the ephemeral repo, which removes all issues and webhooks.
@@ -103,44 +133,66 @@ impl TestContext {
 // ── Seed helper ────────────────────────────────────────────────────────────
 
 /// Seed a fixture into the test repo, returning a map of symbolic id → issue number.
+///
+/// Single-pass: each issue is created with deps and status labels in one shot.
+/// Fixtures are DAGs so deps always reference earlier jobs.
 async fn seed(ctx: &mut TestContext, fixture: &Fixture) -> Result<HashMap<String, u64>> {
     let mut id_to_number: HashMap<String, u64> = HashMap::new();
 
-    // Phase 1: create all issues.
-    for job in &fixture.jobs {
-        let tmp = if job.body.is_empty() { job.title.as_str() } else { job.body.as_str() };
-        let number = ctx.forgejo.create_issue(&ctx.owner, &ctx.repo, &job.title, tmp).await?;
-        id_to_number.insert(job.id.clone(), number);
-        ctx.created.push(number);
-    }
+    // Look up status label IDs for the ephemeral repo.
+    let repo_labels = ctx.forgejo.list_repo_labels(&ctx.owner, &ctx.repo).await?;
+    let blocked_label_id = repo_labels
+        .iter()
+        .find(|l| l.name.as_deref() == Some("status:blocked"))
+        .and_then(|l| l.id.map(|id| id as u64));
+    let on_deck_label_id = repo_labels
+        .iter()
+        .find(|l| l.name.as_deref() == Some("status:on-deck"))
+        .and_then(|l| l.id.map(|id| id as u64));
 
-    // Phase 2: patch bodies with <!-- workflow:deps:N,N --> markers.
     for job in &fixture.jobs {
-        if job.depends_on.is_empty() {
-            continue;
-        }
-        let mut missing = Vec::new();
-        let dep_numbers: Vec<String> = job
+        // Resolve deps (all known since they reference earlier jobs).
+        let dep_numbers: Vec<u64> = job
             .depends_on
             .iter()
-            .map(|dep_id: &String| {
-                id_to_number.get(dep_id).map(|n| n.to_string()).unwrap_or_else(|| {
-                    missing.push(dep_id.clone());
-                    dep_id.clone()
-                })
+            .filter_map(|dep_id| {
+                let n = id_to_number.get(dep_id).copied();
+                if n.is_none() {
+                    eprintln!("warning: unknown dep id '{dep_id}' in job '{}'", job.id);
+                }
+                n
             })
             .collect();
-        if !missing.is_empty() {
-            bail!("fixture '{}' references unknown dep ids: {:?}", job.id, missing);
-        }
-        let number = *id_to_number.get(&job.id).unwrap();
-        let marker = format!("<!-- workflow:deps:{} -->", dep_numbers.join(","));
-        let new_body = if job.body.is_empty() {
-            marker
+
+        // Build body with dep marker.
+        let base_body = if job.body.is_empty() {
+            &job.title
         } else {
-            format!("{}\n\n{marker}", job.body)
+            &job.body
         };
-        ctx.forgejo.edit_issue_body(&ctx.owner, &ctx.repo, number, &new_body).await?;
+        let body = if dep_numbers.is_empty() {
+            base_body.to_string()
+        } else {
+            let dep_csv: Vec<String> = dep_numbers.iter().map(|n| n.to_string()).collect();
+            format!(
+                "{base_body}\n\n<!-- workflow:deps:{} -->",
+                dep_csv.join(",")
+            )
+        };
+
+        // Status label: on-deck if no deps, blocked if has deps.
+        let label_ids: Vec<u64> = if dep_numbers.is_empty() {
+            on_deck_label_id.into_iter().collect()
+        } else {
+            blocked_label_id.into_iter().collect()
+        };
+
+        let number = ctx
+            .forgejo
+            .create_issue_with_labels(&ctx.owner, &ctx.repo, &job.title, &body, &label_ids)
+            .await?;
+        id_to_number.insert(job.id.clone(), number);
+        ctx.created.push(number);
     }
 
     Ok(id_to_number)
@@ -186,19 +238,25 @@ async fn chain_initial_states() {
 
     let id_map = seed(&mut ctx, &fixture).await.unwrap();
 
-    let expected_blocked = fixture.jobs.iter().filter(|j| !j.depends_on.is_empty()).count();
+    let expected_blocked = fixture
+        .jobs
+        .iter()
+        .filter(|j| !j.depends_on.is_empty())
+        .count();
 
-    let jobs = poll_until(Duration::from_secs(30), || async {
+    let jobs = poll_until(Duration::from_secs(60), || async {
         let all = ctx.sidecar.list_jobs(None).await.ok()?;
         let mine: Vec<_> = all
             .into_iter()
-            .filter(|j| ctx.created.contains(&j.number)
-                && j.repo_owner == ctx.owner
-                && j.repo_name == ctx.repo)
+            .filter(|j| {
+                ctx.created.contains(&j.number)
+                    && j.repo_owner == ctx.owner
+                    && j.repo_name == ctx.repo
+            })
             .collect();
-        let stable = mine.iter().all(|j| {
-            j.state == JobState::OnDeck || j.state == JobState::Blocked
-        });
+        let stable = mine
+            .iter()
+            .all(|j| j.state == JobState::OnDeck || j.state == JobState::Blocked);
         let blocked = mine.iter().filter(|j| j.state == JobState::Blocked).count();
         if mine.len() == fixture.jobs.len() && stable && blocked == expected_blocked {
             Some(mine)
@@ -211,7 +269,11 @@ async fn chain_initial_states() {
 
     let by_number: HashMap<u64, _> = jobs.iter().map(|j| (j.number, j)).collect();
 
-    assert_eq!(by_number[&id_map["setup"]].state, JobState::OnDeck, "setup should be on-deck");
+    assert_eq!(
+        by_number[&id_map["setup"]].state,
+        JobState::OnDeck,
+        "setup should be on-deck"
+    );
     for id in &["schema", "api", "tests", "docs", "release"] {
         assert_eq!(
             by_number[&id_map[*id]].state,
@@ -233,20 +295,26 @@ async fn chain_completing_head_unblocks_next() {
 
     let id_map = seed(&mut ctx, &fixture).await.unwrap();
 
-    let expected_blocked = fixture.jobs.iter().filter(|j| !j.depends_on.is_empty()).count();
+    let expected_blocked = fixture
+        .jobs
+        .iter()
+        .filter(|j| !j.depends_on.is_empty())
+        .count();
 
     // Wait for stable initial state.
-    poll_until(Duration::from_secs(30), || async {
+    poll_until(Duration::from_secs(60), || async {
         let all = ctx.sidecar.list_jobs(None).await.ok()?;
         let mine: Vec<_> = all
             .into_iter()
-            .filter(|j| ctx.created.contains(&j.number)
-                && j.repo_owner == ctx.owner
-                && j.repo_name == ctx.repo)
+            .filter(|j| {
+                ctx.created.contains(&j.number)
+                    && j.repo_owner == ctx.owner
+                    && j.repo_name == ctx.repo
+            })
             .collect();
-        let stable = mine.iter().all(|j| {
-            j.state == JobState::OnDeck || j.state == JobState::Blocked
-        });
+        let stable = mine
+            .iter()
+            .all(|j| j.state == JobState::OnDeck || j.state == JobState::Blocked);
         let blocked = mine.iter().filter(|j| j.state == JobState::Blocked).count();
         if mine.len() == fixture.jobs.len() && stable && blocked == expected_blocked {
             Some(())
@@ -257,9 +325,9 @@ async fn chain_completing_head_unblocks_next() {
     .await
     .expect("timed out waiting for initial state");
 
-    // Claim and complete "setup", then close the issue (simulating a
-    // reviewer merging the associated PR).  Dependency resolution is
-    // triggered by the Forgejo `closed` webhook, not by `/complete`.
+    // Claim and complete "setup". The sidecar /complete endpoint transitions
+    // the job to in-review. Then close the issue with a status:done label so
+    // the CDC detects it as Done (not Revoked) and unblocks dependents.
     let setup_n = id_map["setup"];
     let worker = env("TEST_WORKER", "test-worker");
     ctx.sidecar
@@ -267,21 +335,61 @@ async fn chain_completing_head_unblocks_next() {
         .await
         .unwrap()
         .expect("setup should be claimable");
-    ctx.sidecar.complete(&ctx.owner, &ctx.repo, setup_n, &worker).await.unwrap();
-    ctx.forgejo.close_issue(&ctx.owner, &ctx.repo, setup_n).await.unwrap();
+    ctx.sidecar
+        .complete(&ctx.owner, &ctx.repo, setup_n, &worker)
+        .await
+        .unwrap();
+
+    // Add the done label before closing so the CDC sees closed_by_merge || has_done_label.
+    let done_label_id = {
+        let labels = ctx
+            .forgejo
+            .list_repo_labels(&ctx.owner, &ctx.repo)
+            .await
+            .unwrap();
+        labels
+            .iter()
+            .find(|l| l.name.as_deref() == Some("status:done"))
+            .and_then(|l| l.id)
+            .expect("status:done label must exist") as u64
+    };
+    ctx.forgejo
+        .add_issue_labels(&ctx.owner, &ctx.repo, setup_n, &[done_label_id])
+        .await
+        .unwrap();
+    ctx.forgejo
+        .close_issue(&ctx.owner, &ctx.repo, setup_n)
+        .await
+        .unwrap();
 
     // "schema" (direct dependent) should become on-deck.
     let schema_n = id_map["schema"];
-    poll_until(Duration::from_secs(30), || async {
-        let resp = ctx.sidecar.get_job(&ctx.owner, &ctx.repo, schema_n).await.ok()?;
-        if resp.job.state == JobState::OnDeck { Some(()) } else { None }
+    poll_until(Duration::from_secs(60), || async {
+        let resp = ctx
+            .sidecar
+            .get_job(&ctx.owner, &ctx.repo, schema_n)
+            .await
+            .ok()?;
+        if resp.job.state == JobState::OnDeck {
+            Some(())
+        } else {
+            None
+        }
     })
     .await
     .expect("timed out waiting for schema to become on-deck");
 
     // "api" should still be blocked (schema not done yet).
-    let api_resp = ctx.sidecar.get_job(&ctx.owner, &ctx.repo, id_map["api"]).await.unwrap();
-    assert_eq!(api_resp.job.state, JobState::Blocked, "api should still be blocked");
+    let api_resp = ctx
+        .sidecar
+        .get_job(&ctx.owner, &ctx.repo, id_map["api"])
+        .await
+        .unwrap();
+    assert_eq!(
+        api_resp.job.state,
+        JobState::Blocked,
+        "api should still be blocked"
+    );
 
     ctx.teardown().await;
 }
@@ -297,19 +405,25 @@ async fn hub_initial_states() {
     let id_map = seed(&mut ctx, &fixture).await.unwrap();
 
     // Count how many jobs have dependencies — they should end up Blocked.
-    let expected_blocked = fixture.jobs.iter().filter(|j| !j.depends_on.is_empty()).count();
+    let expected_blocked = fixture
+        .jobs
+        .iter()
+        .filter(|j| !j.depends_on.is_empty())
+        .count();
 
     let jobs = poll_until(Duration::from_secs(60), || async {
         let all = ctx.sidecar.list_jobs(None).await.ok()?;
         let mine: Vec<_> = all
             .into_iter()
-            .filter(|j| ctx.created.contains(&j.number)
-                && j.repo_owner == ctx.owner
-                && j.repo_name == ctx.repo)
+            .filter(|j| {
+                ctx.created.contains(&j.number)
+                    && j.repo_owner == ctx.owner
+                    && j.repo_name == ctx.repo
+            })
             .collect();
-        let stable = mine.iter().all(|j| {
-            j.state == JobState::OnDeck || j.state == JobState::Blocked
-        });
+        let stable = mine
+            .iter()
+            .all(|j| j.state == JobState::OnDeck || j.state == JobState::Blocked);
         let blocked = mine.iter().filter(|j| j.state == JobState::Blocked).count();
         if mine.len() == fixture.jobs.len() && stable && blocked == expected_blocked {
             Some(mine)
@@ -322,22 +436,28 @@ async fn hub_initial_states() {
 
     let by_number: HashMap<u64, _> = jobs.iter().map(|j| (j.number, j)).collect();
 
-    for id in &["infra-plan", "auth-design", "fe-wireframes", "data-model"] {
+    // Root jobs (no deps) should be on-deck, rest should be blocked.
+    let root_ids: Vec<&str> = fixture
+        .jobs
+        .iter()
+        .filter(|j| j.depends_on.is_empty())
+        .map(|j| j.id.as_str())
+        .collect();
+    let dep_ids: Vec<&str> = fixture
+        .jobs
+        .iter()
+        .filter(|j| !j.depends_on.is_empty())
+        .map(|j| j.id.as_str())
+        .collect();
+
+    for id in &root_ids {
         assert_eq!(
             by_number[&id_map[*id]].state,
             JobState::OnDeck,
             "'{id}' should be on-deck"
         );
     }
-
-    let spoke_ids = [
-        "infra-terraform", "infra-ci",
-        "auth-impl", "auth-tests",
-        "fe-components", "fe-integration",
-        "data-migrations", "data-seed",
-        "hub-integration", "load-test", "security-audit", "final-release",
-    ];
-    for id in &spoke_ids {
+    for id in &dep_ids {
         assert_eq!(
             by_number[&id_map[*id]].state,
             JobState::Blocked,

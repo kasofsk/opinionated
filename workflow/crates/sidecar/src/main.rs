@@ -48,7 +48,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn journal(&self, action: &str, comment: &str, job_key: Option<&str>, worker_id: Option<&str>) {
+    pub async fn journal(
+        &self,
+        action: &str,
+        comment: &str,
+        job_key: Option<&str>,
+        worker_id: Option<&str>,
+    ) {
         let entry = JournalEntry {
             timestamp: chrono::Utc::now(),
             action: action.to_string(),
@@ -88,8 +94,14 @@ async fn main() -> anyhow::Result<()> {
     let dispatch_registry = Arc::new(DashMap::new());
     let pending_reworks = DashMap::new();
     let state = Arc::new(AppState {
-        graph, coord, forgejo, dispatcher_forgejo, config,
-        registry, dispatch_registry, pending_reworks,
+        graph,
+        coord,
+        forgejo,
+        dispatcher_forgejo,
+        config,
+        registry,
+        dispatch_registry,
+        pending_reworks,
         retry_counts: DashMap::new(),
     });
 
@@ -133,7 +145,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         // Job lifecycle
         .route("/jobs/:owner/:repo/:number/claim", post(api::claim_job))
         .route("/jobs/:owner/:repo/:number/heartbeat", post(api::heartbeat))
-        .route("/jobs/:owner/:repo/:number/complete", post(api::complete_job))
+        .route(
+            "/jobs/:owner/:repo/:number/complete",
+            post(api::complete_job),
+        )
         .route("/jobs/:owner/:repo/:number/abandon", post(api::abandon_job))
         .route("/jobs/:owner/:repo/:number/fail", post(api::fail_job))
         .route("/jobs/:owner/:repo/:number/requeue", post(api::requeue_job))
@@ -149,8 +164,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/dispatch/workers", get(api::list_dispatch_workers))
         .route("/dispatch/journal", get(api::get_dispatch_journal))
         // Graph viewer
-        .route("/graph", get(|| async {
-            Html(include_str!("../static/graph.html"))
-        }))
+        .route(
+            "/graph",
+            get(|| async { Html(include_str!("../static/graph.html")) }),
+        )
         .with_state(state)
 }

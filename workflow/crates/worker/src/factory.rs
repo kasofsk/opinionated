@@ -35,11 +35,7 @@ pub trait WorkFactory: Send + Sync {
     }
 
     /// Called on each poll interval.
-    async fn poll(
-        &self,
-        sidecar: &SidecarClient,
-        forgejo: &ForgejoClient,
-    ) -> Result<()>;
+    async fn poll(&self, sidecar: &SidecarClient, forgejo: &ForgejoClient) -> Result<()>;
 
     /// Called when a message arrives on one of `nats_subjects`.
     async fn on_event(
@@ -83,19 +79,13 @@ impl FactoryRunner {
             if let Some(interval_secs) = factory.poll_interval_secs() {
                 let runner = std::sync::Arc::clone(&self);
                 tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(
-                        std::time::Duration::from_secs(interval_secs),
-                    );
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(interval_secs));
                     loop {
                         interval.tick().await;
                         if let Some(f) = runner.factories.get(i) {
-                            if let Err(e) =
-                                f.poll(&runner.sidecar, &runner.forgejo).await
-                            {
-                                tracing::error!(
-                                    factory = f.name(),
-                                    "poll error: {e:#}"
-                                );
+                            if let Err(e) = f.poll(&runner.sidecar, &runner.forgejo).await {
+                                tracing::error!(factory = f.name(), "poll error: {e:#}");
                             }
                         }
                     }

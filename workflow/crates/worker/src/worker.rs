@@ -75,11 +75,7 @@ pub trait Worker: Send + Sync {
     ///   this call; do **not** send heartbeats manually.
     /// - Use `forgejo` for content operations (comments, branches, PRs).
     /// - Return [`Outcome::Complete`], [`Outcome::Fail`], or [`Outcome::Abandon`].
-    async fn execute(
-        &self,
-        job: &Job,
-        forgejo: &ForgejoClient,
-    ) -> Result<Outcome>;
+    async fn execute(&self, job: &Job, forgejo: &ForgejoClient) -> Result<Outcome>;
 }
 
 // ── WorkerLoop ────────────────────────────────────────────────────────────────
@@ -129,7 +125,10 @@ impl<W: Worker> WorkerLoop<W> {
         let number = job.number;
         let worker_id = self.worker.worker_id().to_string();
 
-        let claim_resp = self.sidecar.claim(&owner, &repo, number, &worker_id).await?;
+        let claim_resp = self
+            .sidecar
+            .claim(&owner, &repo, number, &worker_id)
+            .await?;
         let _claim = match claim_resp {
             Some(c) => c,
             None => return Ok(false), // race — another worker got there first
@@ -164,16 +163,15 @@ impl<W: Worker> WorkerLoop<W> {
             });
         }
 
-        let outcome = self
-            .worker
-            .execute(&job, &self.forgejo)
-            .await;
+        let outcome = self.worker.execute(&job, &self.forgejo).await;
 
         let _ = hb_cancel.send(()); // stop heartbeat
 
         match outcome {
             Ok(Outcome::Complete) => {
-                self.sidecar.complete(&owner, &repo, number, &worker_id).await?;
+                self.sidecar
+                    .complete(&owner, &repo, number, &worker_id)
+                    .await?;
                 tracing::info!(worker_id, owner, repo, number, "job complete");
             }
             Ok(Outcome::Fail { reason, logs }) => {
@@ -185,13 +183,19 @@ impl<W: Worker> WorkerLoop<W> {
             }
             Ok(Outcome::Abandon) => {
                 tracing::info!(worker_id, owner, repo, number, "job abandoned");
-                let _ = self.sidecar.abandon(&owner, &repo, number, &worker_id).await;
+                let _ = self
+                    .sidecar
+                    .abandon(&owner, &repo, number, &worker_id)
+                    .await;
             }
             Ok(Outcome::Yield) => {
                 // Release claim via abandon but don't change state.
                 // An external signal (CDC detecting PR) will handle the transition.
                 tracing::info!(worker_id, owner, repo, number, "job yielded");
-                let _ = self.sidecar.abandon(&owner, &repo, number, &worker_id).await;
+                let _ = self
+                    .sidecar
+                    .abandon(&owner, &repo, number, &worker_id)
+                    .await;
             }
             Err(e) => {
                 tracing::error!(worker_id, owner, repo, number, "execute error: {e:#}");

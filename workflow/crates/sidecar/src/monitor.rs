@@ -63,7 +63,9 @@ async fn check_timeouts(state: &Arc<AppState>) -> anyhow::Result<()> {
 
         // Release claim, update graph, update Forgejo in parallel
         let release = state.coord.release(&key);
-        let set_state = state.graph.set_state(&key, &workflow_types::JobState::Failed);
+        let set_state = state
+            .graph
+            .set_state(&key, &workflow_types::JobState::Failed);
 
         // Release NATS claim
         if let Err(e) = release.await {
@@ -94,11 +96,14 @@ async fn check_timeouts(state: &Arc<AppState>) -> anyhow::Result<()> {
 
         // Publish transition so the dispatcher can react.
         if let Ok(Some(job)) = state.graph.get_job(&key) {
-            state.coord.publish_transition(&JobTransition {
-                job,
-                previous_state: Some(JobState::OnTheStack),
-                new_state: JobState::Failed,
-            }).await;
+            state
+                .coord
+                .publish_transition(&JobTransition {
+                    job,
+                    previous_state: Some(JobState::OnTheStack),
+                    new_state: JobState::Failed,
+                })
+                .await;
         }
     }
 

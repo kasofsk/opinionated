@@ -81,7 +81,9 @@ impl<W: Worker> DispatchedWorkerLoop<W> {
 
         loop {
             // Signal idle.
-            let idle = IdleEvent { worker_id: worker_id.clone() };
+            let idle = IdleEvent {
+                worker_id: worker_id.clone(),
+            };
             self.nats
                 .publish(
                     "workflow.dispatch.idle",
@@ -151,7 +153,8 @@ impl<W: Worker> DispatchedWorkerLoop<W> {
             // Local validation — worker can still reject.
             if !self.worker.accepts(job) {
                 tracing::info!(worker_id, key = %job_key, "rejecting assignment (accepts=false)");
-                self.publish_outcome(&worker_id, &job_key, OutcomeReport::Abandon).await;
+                self.publish_outcome(&worker_id, &job_key, OutcomeReport::Abandon)
+                    .await;
                 continue;
             }
 

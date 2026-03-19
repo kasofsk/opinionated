@@ -20,30 +20,30 @@ pub enum JobState {
 impl JobState {
     pub fn from_label(s: &str) -> Option<Self> {
         match s {
-            "status:on-ice"       => Some(Self::OnIce),
-            "status:blocked"      => Some(Self::Blocked),
-            "status:on-deck"      => Some(Self::OnDeck),
+            "status:on-ice" => Some(Self::OnIce),
+            "status:blocked" => Some(Self::Blocked),
+            "status:on-deck" => Some(Self::OnDeck),
             "status:on-the-stack" => Some(Self::OnTheStack),
-            "status:in-review"    => Some(Self::InReview),
-            "status:rework"       => Some(Self::Rework),
-            "status:done"         => Some(Self::Done),
-            "status:failed"       => Some(Self::Failed),
-            "status:revoked"      => Some(Self::Revoked),
-            _                     => None,
+            "status:in-review" => Some(Self::InReview),
+            "status:rework" => Some(Self::Rework),
+            "status:done" => Some(Self::Done),
+            "status:failed" => Some(Self::Failed),
+            "status:revoked" => Some(Self::Revoked),
+            _ => None,
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::OnIce      => "status:on-ice",
-            Self::Blocked    => "status:blocked",
-            Self::OnDeck     => "status:on-deck",
+            Self::OnIce => "status:on-ice",
+            Self::Blocked => "status:blocked",
+            Self::OnDeck => "status:on-deck",
             Self::OnTheStack => "status:on-the-stack",
-            Self::InReview   => "status:in-review",
-            Self::Rework     => "status:rework",
-            Self::Done       => "status:done",
-            Self::Failed     => "status:failed",
-            Self::Revoked    => "status:revoked",
+            Self::InReview => "status:in-review",
+            Self::Rework => "status:rework",
+            Self::Done => "status:done",
+            Self::Failed => "status:failed",
+            Self::Revoked => "status:revoked",
         }
     }
 
@@ -101,7 +101,12 @@ pub struct ClaimState {
 impl ClaimState {
     pub fn new(worker_id: String, timeout_secs: u64) -> Self {
         let now = Utc::now();
-        Self { worker_id, claimed_at: now, last_heartbeat: now, timeout_secs }
+        Self {
+            worker_id,
+            claimed_at: now,
+            last_heartbeat: now,
+            timeout_secs,
+        }
     }
 
     pub fn is_timed_out(&self) -> bool {
@@ -322,7 +327,10 @@ pub struct WorkerHeartbeat {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OutcomeReport {
     Complete,
-    Fail { reason: String, logs: Option<String> },
+    Fail {
+        reason: String,
+        logs: Option<String>,
+    },
     Abandon,
     /// Release claim without changing state; an external signal handles the transition.
     Yield,
@@ -510,7 +518,11 @@ pub fn parse_retries(labels: &[ForgejoLabel]) -> u32 {
 pub fn parse_capabilities(labels: &[ForgejoLabel]) -> Vec<String> {
     labels
         .iter()
-        .filter_map(|l| l.name.strip_prefix("capability:").map(|s| s.trim().to_string()))
+        .filter_map(|l| {
+            l.name
+                .strip_prefix("capability:")
+                .map(|s| s.trim().to_string())
+        })
         .collect()
 }
 
@@ -539,8 +551,16 @@ mod tests {
     #[test]
     fn test_parse_priority() {
         let labels = vec![
-            ForgejoLabel { id: 1, name: "priority:75".into(), color: String::new() },
-            ForgejoLabel { id: 2, name: "status:on-deck".into(), color: String::new() },
+            ForgejoLabel {
+                id: 1,
+                name: "priority:75".into(),
+                color: String::new(),
+            },
+            ForgejoLabel {
+                id: 2,
+                name: "status:on-deck".into(),
+                color: String::new(),
+            },
         ];
         assert_eq!(parse_priority(&labels), 75);
     }
@@ -588,9 +608,21 @@ mod tests {
     #[test]
     fn test_parse_capabilities() {
         let labels = vec![
-            ForgejoLabel { id: 1, name: "capability:rust".into(), color: String::new() },
-            ForgejoLabel { id: 2, name: "capability:frontend".into(), color: String::new() },
-            ForgejoLabel { id: 3, name: "status:on-deck".into(), color: String::new() },
+            ForgejoLabel {
+                id: 1,
+                name: "capability:rust".into(),
+                color: String::new(),
+            },
+            ForgejoLabel {
+                id: 2,
+                name: "capability:frontend".into(),
+                color: String::new(),
+            },
+            ForgejoLabel {
+                id: 3,
+                name: "status:on-deck".into(),
+                color: String::new(),
+            },
         ];
         let mut caps = parse_capabilities(&labels);
         caps.sort();
@@ -599,9 +631,11 @@ mod tests {
 
     #[test]
     fn test_parse_capabilities_empty() {
-        let labels: Vec<ForgejoLabel> = vec![
-            ForgejoLabel { id: 1, name: "status:on-deck".into(), color: String::new() },
-        ];
+        let labels: Vec<ForgejoLabel> = vec![ForgejoLabel {
+            id: 1,
+            name: "status:on-deck".into(),
+            color: String::new(),
+        }];
         assert!(parse_capabilities(&labels).is_empty());
     }
 }

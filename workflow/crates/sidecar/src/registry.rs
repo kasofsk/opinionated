@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::future::Future;
-use std::sync::Arc;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use workflow_types::FactoryStatus;
 
@@ -93,8 +93,7 @@ impl FactoryRegistry {
                 let factory_c = Arc::clone(&factory);
                 let state = Arc::clone(&app_state);
                 tokio::spawn(async move {
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_secs(secs));
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(secs));
                     loop {
                         interval.tick().await;
                         registry
@@ -115,15 +114,12 @@ impl FactoryRegistry {
                 tokio::spawn(async move {
                     match nats.subscribe(subj.clone()).await {
                         Ok(mut sub) => {
-                            while let Some(msg) =
-                                futures::StreamExt::next(&mut sub).await
-                            {
+                            while let Some(msg) = futures::StreamExt::next(&mut sub).await {
                                 let payload = msg.payload.to_vec();
                                 let factory_c = Arc::clone(&factory_c);
                                 let state_c = Arc::clone(&state);
-                                let result = factory_c
-                                    .on_event(subj.clone(), payload, state_c)
-                                    .await;
+                                let result =
+                                    factory_c.on_event(subj.clone(), payload, state_c).await;
                                 if let Err(e) = result {
                                     tracing::error!(
                                         factory = name_c,
@@ -184,12 +180,7 @@ impl FactoryRegistry {
             .collect()
     }
 
-    async fn run_factory(
-        &self,
-        name: &str,
-        factory: Arc<dyn WorkFactory>,
-        state: Arc<AppState>,
-    ) {
+    async fn run_factory(&self, name: &str, factory: Arc<dyn WorkFactory>, state: Arc<AppState>) {
         let result = factory.poll(state).await;
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.get_mut(name) {

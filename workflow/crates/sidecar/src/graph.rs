@@ -2,9 +2,8 @@ use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Context, Result};
 use indradb::{
-    AllVertexQuery, Database, Edge, Identifier, Json, QueryExt,
-    QueryOutputValue, RocksdbDatastore, SpecificEdgeQuery, SpecificVertexQuery,
-    Vertex,
+    AllVertexQuery, Database, Edge, Identifier, Json, QueryExt, QueryOutputValue, RocksdbDatastore,
+    SpecificEdgeQuery, SpecificVertexQuery, Vertex,
 };
 use uuid::Uuid;
 use workflow_types::{Job, JobState};
@@ -21,8 +20,7 @@ pub struct TaskGraph {
 
 impl TaskGraph {
     pub fn open(path: &str) -> Result<Self> {
-        let db = RocksdbDatastore::new_db(path)
-            .context("open RocksDB datastore")?;
+        let db = RocksdbDatastore::new_db(path).context("open RocksDB datastore")?;
         Ok(Self {
             db,
             job_type: Identifier::new("job").unwrap(),
@@ -89,11 +87,7 @@ impl TaskGraph {
     /// (e.g. a Forgejo comment) so authors can fix the dep list.
     ///
     /// Edge direction: `job_key --depends_on--> dep_key`.
-    pub fn sync_deps(
-        &self,
-        job_key: &str,
-        dep_keys: &[String],
-    ) -> Result<Vec<String>> {
+    pub fn sync_deps(&self, job_key: &str, dep_keys: &[String]) -> Result<Vec<String>> {
         let from_id = Self::job_uuid(job_key);
 
         // Current outbound `depends_on` edges from this vertex
@@ -106,8 +100,7 @@ impl TaskGraph {
             edges_from_output(results)
         };
 
-        let desired_dep_ids: Vec<Uuid> =
-            dep_keys.iter().map(|k| Self::job_uuid(k)).collect();
+        let desired_dep_ids: Vec<Uuid> = dep_keys.iter().map(|k| Self::job_uuid(k)).collect();
 
         // Remove stale edges
         for edge in &current_edges {
@@ -117,8 +110,7 @@ impl TaskGraph {
             }
         }
 
-        let current_dep_ids: Vec<Uuid> =
-            current_edges.iter().map(|e| e.inbound_id).collect();
+        let current_dep_ids: Vec<Uuid> = current_edges.iter().map(|e| e.inbound_id).collect();
 
         let mut rejected = Vec::new();
 
@@ -130,11 +122,7 @@ impl TaskGraph {
 
             // Self-dependency or cycle check
             if self.would_create_cycle(from_id, *dep_id)? {
-                tracing::warn!(
-                    job_key,
-                    dep_key,
-                    "rejected dep edge: would create a cycle"
-                );
+                tracing::warn!(job_key, dep_key, "rejected dep edge: would create a cycle");
                 rejected.push(dep_key.clone());
                 continue;
             }
@@ -170,8 +158,10 @@ impl TaskGraph {
             .context("build inbound query")?
             .t(self.dep_type);
         let results = self.db.get(q).context("get inbound edges")?;
-        let dependent_ids: Vec<Uuid> =
-            edges_from_output(results).into_iter().map(|e| e.outbound_id).collect();
+        let dependent_ids: Vec<Uuid> = edges_from_output(results)
+            .into_iter()
+            .map(|e| e.outbound_id)
+            .collect();
 
         if dependent_ids.is_empty() {
             return Ok(vec![]);
@@ -214,8 +204,10 @@ impl TaskGraph {
             .context("build outbound query")?
             .t(self.dep_type);
         let results = self.db.get(q).context("get outbound edges")?;
-        let dep_ids: Vec<Uuid> =
-            edges_from_output(results).into_iter().map(|e| e.inbound_id).collect();
+        let dep_ids: Vec<Uuid> = edges_from_output(results)
+            .into_iter()
+            .map(|e| e.inbound_id)
+            .collect();
 
         if dep_ids.is_empty() {
             return Ok(true);
@@ -230,7 +222,6 @@ impl TaskGraph {
 
         Ok(jobs.len() == dep_count && jobs.iter().all(|j| j.state == JobState::Done))
     }
-
 
     // ── DAG enforcement ───────────────────────────────────────────────────────
 
@@ -283,9 +274,9 @@ fn extract_jobs(output: Vec<QueryOutputValue>) -> Vec<Job> {
             QueryOutputValue::VertexProperties(props) => props
                 .into_iter()
                 .flat_map(|vp| {
-                    vp.props.into_iter().filter_map(|np| {
-                        serde_json::from_value::<Job>((*np.value.0).clone()).ok()
-                    })
+                    vp.props
+                        .into_iter()
+                        .filter_map(|np| serde_json::from_value::<Job>((*np.value.0).clone()).ok())
                 })
                 .collect::<Vec<_>>(),
             _ => vec![],
@@ -353,7 +344,7 @@ mod tests {
             timeout_secs: None,
             capabilities: vec![],
             max_retries: 3,
-            }
+        }
     }
 
     #[test]
@@ -404,8 +395,14 @@ mod tests {
         for n in 1..=3 {
             g.upsert_job(&make_job("o", "r", n)).unwrap();
         }
-        assert!(g.sync_deps("o/r/1", &["o/r/2".to_string()]).unwrap().is_empty());
-        assert!(g.sync_deps("o/r/2", &["o/r/3".to_string()]).unwrap().is_empty());
+        assert!(g
+            .sync_deps("o/r/1", &["o/r/2".to_string()])
+            .unwrap()
+            .is_empty());
+        assert!(g
+            .sync_deps("o/r/2", &["o/r/3".to_string()])
+            .unwrap()
+            .is_empty());
 
         // C→A would close the cycle
         let rejected = g.sync_deps("o/r/3", &["o/r/1".to_string()]).unwrap();
@@ -419,9 +416,18 @@ mod tests {
         for n in 1..=4 {
             g.upsert_job(&make_job("o", "r", n)).unwrap();
         }
-        assert!(g.sync_deps("o/r/1", &["o/r/2".to_string(), "o/r/3".to_string()]).unwrap().is_empty());
-        assert!(g.sync_deps("o/r/2", &["o/r/4".to_string()]).unwrap().is_empty());
-        assert!(g.sync_deps("o/r/3", &["o/r/4".to_string()]).unwrap().is_empty());
+        assert!(g
+            .sync_deps("o/r/1", &["o/r/2".to_string(), "o/r/3".to_string()])
+            .unwrap()
+            .is_empty());
+        assert!(g
+            .sync_deps("o/r/2", &["o/r/4".to_string()])
+            .unwrap()
+            .is_empty());
+        assert!(g
+            .sync_deps("o/r/3", &["o/r/4".to_string()])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -448,7 +454,8 @@ mod tests {
         let mut b2 = make_job("o", "r", 3);
         b2.state = JobState::OnDeck;
         g.upsert_job(&b2).unwrap();
-        g.sync_deps("o/r/1", &["o/r/2".to_string(), "o/r/3".to_string()]).unwrap();
+        g.sync_deps("o/r/1", &["o/r/2".to_string(), "o/r/3".to_string()])
+            .unwrap();
         assert!(!g.all_deps_done("o/r/1").unwrap());
     }
 }

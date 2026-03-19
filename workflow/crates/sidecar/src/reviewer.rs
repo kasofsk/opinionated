@@ -42,7 +42,12 @@ impl Reviewer {
         human_login: String,
         delay_secs: u64,
     ) -> Self {
-        Self { state, forgejo, human_login, delay_secs }
+        Self {
+            state,
+            forgejo,
+            human_login,
+            delay_secs,
+        }
     }
 
     /// Start the background NATS subscription.
@@ -159,7 +164,13 @@ impl Reviewer {
 
         // Submit approving review.
         self.forgejo
-            .submit_review(owner, repo, pr_num(&pr), "LGTM — automated review passed.", "APPROVED")
+            .submit_review(
+                owner,
+                repo,
+                pr_num(&pr),
+                "LGTM — automated review passed.",
+                "APPROVED",
+            )
             .await?;
 
         // Merge with retry — Forgejo may not accept the merge immediately
@@ -168,8 +179,15 @@ impl Reviewer {
         let max_attempts = 5;
         let mut merged = false;
         for attempt in 1..=max_attempts {
-            match self.forgejo.merge_pr(owner, repo, pr_num(&pr), "merge").await {
-                Ok(()) => { merged = true; break; }
+            match self
+                .forgejo
+                .merge_pr(owner, repo, pr_num(&pr), "merge")
+                .await
+            {
+                Ok(()) => {
+                    merged = true;
+                    break;
+                }
                 Err(e) if attempt < max_attempts => {
                     tracing::debug!(
                         pr_number = pr_num(&pr),
@@ -196,12 +214,14 @@ impl Reviewer {
             return self.escalate_to_human(owner, repo, issue_number, pr).await;
         }
 
-        self.state.journal(
-            "approve",
-            &format!("Approved and merged PR #{} for job", pr_num(&pr)),
-            Some(&job_key),
-            Some("workflow-reviewer"),
-        ).await;
+        self.state
+            .journal(
+                "approve",
+                &format!("Approved and merged PR #{} for job", pr_num(&pr)),
+                Some(&job_key),
+                Some("workflow-reviewer"),
+            )
+            .await;
 
         tracing::info!(
             job_key = %job_key,
@@ -239,15 +259,18 @@ impl Reviewer {
             .post_comment(owner, repo, pr_num(&pr), &comment)
             .await?;
 
-        self.state.journal(
-            "escalate",
-            &format!(
-                "Escalated PR #{} to human reviewer @{}",
-                pr_num(&pr), self.human_login
-            ),
-            Some(&job_key),
-            Some("workflow-reviewer"),
-        ).await;
+        self.state
+            .journal(
+                "escalate",
+                &format!(
+                    "Escalated PR #{} to human reviewer @{}",
+                    pr_num(&pr),
+                    self.human_login
+                ),
+                Some(&job_key),
+                Some("workflow-reviewer"),
+            )
+            .await;
 
         tracing::info!(
             job_key = %job_key,

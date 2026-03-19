@@ -9,15 +9,18 @@ use serde::Deserialize;
 use workflow_types::{Job, JobState, RequeueTarget};
 use workflow_worker::{
     client::SidecarClient,
-    DispatchedWorkerLoop,
     forgejo::ForgejoClient,
     worker::{Outcome, Worker, WorkerLoop},
+    DispatchedWorkerLoop,
 };
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "worker-cli", about = "Interactive CLI worker for testing the workflow system")]
+#[command(
+    name = "worker-cli",
+    about = "Interactive CLI worker for testing the workflow system"
+)]
 struct Args {
     /// Sidecar base URL
     #[arg(long, env = "SIDECAR_URL", default_value = "http://localhost:3000")]
@@ -182,7 +185,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::Sim { nats_url, delay_secs } => {
+        Cmd::Sim {
+            nats_url,
+            delay_secs,
+        } => {
             let worker = SimWorker::new(args.worker_id.clone(), *delay_secs);
             let loop_ = DispatchedWorkerLoop::new(
                 worker,
@@ -199,7 +205,14 @@ async fn main() -> Result<()> {
             loop_.run().await
         }
 
-        Cmd::Action { nats_url, workflow, runner, git_ref, poll_secs, timeout_secs } => {
+        Cmd::Action {
+            nats_url,
+            workflow,
+            runner,
+            git_ref,
+            poll_secs,
+            timeout_secs,
+        } => {
             let worker = ActionWorker::new(
                 args.worker_id.clone(),
                 workflow.clone(),
@@ -224,7 +237,12 @@ async fn main() -> Result<()> {
             loop_.run().await
         }
 
-        Cmd::Seed { repo, fixture, create_repo, webhook_url } => {
+        Cmd::Seed {
+            repo,
+            fixture,
+            create_repo,
+            webhook_url,
+        } => {
             let forgejo = ForgejoClient::new(&args.forgejo_url, &args.forgejo_token);
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
             if parts.len() != 2 {
@@ -244,10 +262,13 @@ async fn main() -> Result<()> {
                     }
                 }
                 // Set up the sidecar webhook.
-                let wh = webhook_url.as_deref()
+                let wh = webhook_url
+                    .as_deref()
                     .unwrap_or("http://host.docker.internal:8080");
                 let target = format!("{}/webhook", wh.trim_end_matches('/'));
-                forgejo.create_webhook(parts[0], parts[1], &target).await
+                forgejo
+                    .create_webhook(parts[0], parts[1], &target)
+                    .await
                     .context("create webhook")?;
                 println!("Webhook → {target}");
             }
@@ -289,10 +310,7 @@ async fn cmd_show(sidecar: &SidecarClient, job_ref: &str) -> Result<()> {
         );
     }
     if let Some(failure) = resp.failure {
-        println!(
-            "\nFailure ({:?}): {}",
-            failure.kind, failure.reason
-        );
+        println!("\nFailure ({:?}): {}", failure.kind, failure.reason);
     }
     Ok(())
 }
@@ -316,7 +334,9 @@ async fn cmd_claim(
 
     match outcome {
         Outcome::Complete => {
-            sidecar.complete(owner, repo, number, &args.worker_id).await?;
+            sidecar
+                .complete(owner, repo, number, &args.worker_id)
+                .await?;
             println!("✓ Job marked complete.");
         }
         Outcome::Fail { reason, .. } => {
@@ -326,11 +346,15 @@ async fn cmd_claim(
             println!("✗ Job marked failed.");
         }
         Outcome::Abandon => {
-            sidecar.abandon(owner, repo, number, &args.worker_id).await?;
+            sidecar
+                .abandon(owner, repo, number, &args.worker_id)
+                .await?;
             println!("→ Job returned to on-deck.");
         }
         Outcome::Yield => {
-            sidecar.abandon(owner, repo, number, &args.worker_id).await?;
+            sidecar
+                .abandon(owner, repo, number, &args.worker_id)
+                .await?;
             println!("⏳ Yielded — waiting for external transition.");
         }
     }
@@ -378,17 +402,20 @@ async fn cmd_seed(
         serde_json::from_str(&raw).with_context(|| format!("parse {fixture_path}"))?;
 
     // Derive sidecar URL from SIDECAR_URL env (default localhost:8080).
-    let sidecar_url = std::env::var("SIDECAR_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let sidecar_url =
+        std::env::var("SIDECAR_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let sidecar = SidecarClient::new(&sidecar_url);
 
     println!("Seeding \"{}\" into {owner}/{repo} …", fixture.name);
 
     // Fetch repo labels so we can apply status labels at issue creation time.
     let repo_labels = forgejo.list_repo_labels(owner, repo).await?;
-    let blocked_label_id = repo_labels.iter()
+    let blocked_label_id = repo_labels
+        .iter()
         .find(|l| l.name.as_deref() == Some("status:blocked"))
         .and_then(|l| l.id.map(|id| id as u64));
-    let on_deck_label_id = repo_labels.iter()
+    let on_deck_label_id = repo_labels
+        .iter()
         .find(|l| l.name.as_deref() == Some("status:on-deck"))
         .and_then(|l| l.id.map(|id| id as u64));
 
@@ -461,12 +488,7 @@ async fn cmd_seed(
 }
 
 /// Poll the sidecar until a job appears in the graph.
-async fn wait_for_job(
-    sidecar: &SidecarClient,
-    owner: &str,
-    repo: &str,
-    number: u64,
-) -> Result<()> {
+async fn wait_for_job(sidecar: &SidecarClient, owner: &str, repo: &str, number: u64) -> Result<()> {
     for _ in 0..120 {
         if sidecar.get_job(owner, repo, number).await.is_ok() {
             return Ok(());
@@ -508,7 +530,10 @@ struct CliWorker {
 
 impl CliWorker {
     fn new(worker_id: String, title_filter: Option<String>) -> Self {
-        Self { worker_id, title_filter }
+        Self {
+            worker_id,
+            title_filter,
+        }
     }
 }
 
@@ -525,11 +550,7 @@ impl Worker for CliWorker {
         }
     }
 
-    async fn execute(
-        &self,
-        job: &Job,
-        _forgejo: &ForgejoClient,
-    ) -> Result<Outcome> {
+    async fn execute(&self, job: &Job, _forgejo: &ForgejoClient) -> Result<Outcome> {
         Ok(interactive_session(job))
     }
 }
@@ -543,7 +564,10 @@ struct SimWorker {
 
 impl SimWorker {
     fn new(worker_id: String, delay_secs: u64) -> Self {
-        Self { worker_id, delay_secs }
+        Self {
+            worker_id,
+            delay_secs,
+        }
     }
 }
 
@@ -553,11 +577,7 @@ impl Worker for SimWorker {
         &self.worker_id
     }
 
-    async fn execute(
-        &self,
-        job: &Job,
-        forgejo: &ForgejoClient,
-    ) -> Result<Outcome> {
+    async fn execute(&self, job: &Job, forgejo: &ForgejoClient) -> Result<Outcome> {
         tracing::info!(
             key = %job.key(),
             title = %job.title,
@@ -574,33 +594,53 @@ impl Worker for SimWorker {
             "# {}\n\nWorker: {}\nTimestamp: {}\n",
             job.title, self.worker_id, timestamp
         );
-        let commit_msg = format!("work: {} (#{}) by {}", job.title, job.number, self.worker_id);
+        let commit_msg = format!(
+            "work: {} (#{}) by {}",
+            job.title, job.number, self.worker_id
+        );
         let pr_body = format!(
             "Closes #{}\n\nSimulated work by {}",
             job.number, self.worker_id
         );
 
-        match forgejo.create_branch(&job.repo_owner, &job.repo_name, &branch_name, "main").await {
+        match forgejo
+            .create_branch(&job.repo_owner, &job.repo_name, &branch_name, "main")
+            .await
+        {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!(key = %job.key(), error = %e, "branch creation failed (may already exist from rework), continuing");
             }
         }
 
-        match forgejo.create_file(
-            &job.repo_owner, &job.repo_name, &file_path,
-            &file_content, &commit_msg, &branch_name,
-        ).await {
+        match forgejo
+            .create_file(
+                &job.repo_owner,
+                &job.repo_name,
+                &file_path,
+                &file_content,
+                &commit_msg,
+                &branch_name,
+            )
+            .await
+        {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!(key = %job.key(), error = %e, "file creation failed, continuing");
             }
         }
 
-        match forgejo.create_pr(
-            &job.repo_owner, &job.repo_name,
-            &job.title, &pr_body, &branch_name, "main",
-        ).await {
+        match forgejo
+            .create_pr(
+                &job.repo_owner,
+                &job.repo_name,
+                &job.title,
+                &pr_body,
+                &branch_name,
+                "main",
+            )
+            .await
+        {
             Ok(pr) => {
                 tracing::info!(key = %job.key(), pr_number = pr.number, "opened PR");
             }
@@ -635,7 +675,14 @@ impl ActionWorker {
         poll_secs: u64,
         timeout_secs: u64,
     ) -> Self {
-        Self { worker_id, workflow, runner, git_ref, poll_secs, timeout_secs }
+        Self {
+            worker_id,
+            workflow,
+            runner,
+            git_ref,
+            poll_secs,
+            timeout_secs,
+        }
     }
 }
 
@@ -645,11 +692,7 @@ impl Worker for ActionWorker {
         &self.worker_id
     }
 
-    async fn execute(
-        &self,
-        job: &Job,
-        forgejo: &ForgejoClient,
-    ) -> Result<Outcome> {
+    async fn execute(&self, job: &Job, forgejo: &ForgejoClient) -> Result<Outcome> {
         let runner_label = self.runner.as_deref().unwrap_or("ubuntu-latest");
 
         tracing::info!(
@@ -664,8 +707,10 @@ impl Worker for ActionWorker {
         let mut inputs = std::collections::HashMap::new();
         inputs.insert("issue_number".to_string(), job.number.to_string());
         inputs.insert("runner_label".to_string(), runner_label.to_string());
-        inputs.insert("forgejo_url".to_string(),
-            std::env::var("FORGEJO_URL").unwrap_or_default());
+        inputs.insert(
+            "forgejo_url".to_string(),
+            std::env::var("FORGEJO_URL").unwrap_or_default(),
+        );
 
         // Dispatch the workflow — returns the run ID directly.
         let run_id = forgejo
@@ -702,10 +747,8 @@ impl Worker for ActionWorker {
                     tracing::info!(key = %job.key(), run_id, "action run succeeded, yielding to CDC");
                     return Ok(Outcome::Yield);
                 } else {
-                    let reason = format!(
-                        "action run {run_id} finished with status={}",
-                        run.status,
-                    );
+                    let reason =
+                        format!("action run {run_id} finished with status={}", run.status,);
                     tracing::warn!(key = %job.key(), run_id, %reason, "action run failed");
                     return Ok(Outcome::Fail { reason, logs: None });
                 }
@@ -720,7 +763,6 @@ impl Worker for ActionWorker {
         }
     }
 }
-
 
 // ── interactive session ───────────────────────────────────────────────────────
 
@@ -755,8 +797,11 @@ fn interactive_session(job: &Job) -> Outcome {
                 let mut reason = String::new();
                 let _ = io::stdin().lock().read_line(&mut reason);
                 let reason = reason.trim().to_string();
-                let reason =
-                    if reason.is_empty() { "no reason given".to_string() } else { reason };
+                let reason = if reason.is_empty() {
+                    "no reason given".to_string()
+                } else {
+                    reason
+                };
                 return Outcome::Fail { reason, logs: None };
             }
             ["fail", reason] => {
@@ -804,7 +849,10 @@ fn print_job_table(jobs: &[Job]) {
         "{:<w_ref$}  {:<w_title$}  {:<w_state$}  {:>w_pri$}  {:>w_deps$}",
         "Ref", "Title", "State", "Prio", "Deps"
     );
-    println!("{}", "─".repeat(w_ref + w_title + w_state + w_pri + w_deps + 8));
+    println!(
+        "{}",
+        "─".repeat(w_ref + w_title + w_state + w_pri + w_deps + 8)
+    );
 
     for job in jobs {
         let job_ref = format!("{}/{}/#{}", job.repo_owner, job.repo_name, job.number);
@@ -835,8 +883,11 @@ fn print_job_detail(job: &Job) {
         println!("Timeout:  {t}s");
     }
     if !job.dependency_numbers.is_empty() {
-        let deps: Vec<String> =
-            job.dependency_numbers.iter().map(|n| format!("#{n}")).collect();
+        let deps: Vec<String> = job
+            .dependency_numbers
+            .iter()
+            .map(|n| format!("#{n}"))
+            .collect();
         println!("Deps:     {}", deps.join(", "));
     }
     if !job.assignees.is_empty() {

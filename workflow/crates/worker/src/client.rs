@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use workflow_types::{
     AbandonRequest, ClaimRequest, ClaimResponse, CompleteRequest, DepsResponse,
-    FailRequest, FactoryListResponse, HeartbeatRequest, Job, JobListResponse,
-    JobResponse, RequeueRequest, RequeueTarget,
+    FactoryListResponse, FailRequest, HeartbeatRequest, Job, JobListResponse, JobResponse,
+    RequeueRequest, RequeueTarget,
 };
 
 /// Typed HTTP client for the sidecar API.
@@ -45,12 +45,7 @@ impl SidecarClient {
         Ok(body.jobs)
     }
 
-    pub async fn get_job(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<JobResponse> {
+    pub async fn get_job(&self, owner: &str, repo: &str, number: u64) -> Result<JobResponse> {
         let resp = self
             .http
             .get(self.url(&format!("/jobs/{owner}/{repo}/{number}")))
@@ -62,12 +57,7 @@ impl SidecarClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn get_deps(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<DepsResponse> {
+    pub async fn get_deps(&self, owner: &str, repo: &str, number: u64) -> Result<DepsResponse> {
         let resp = self
             .http
             .get(self.url(&format!("/jobs/{owner}/{repo}/{number}/deps")))
@@ -91,7 +81,9 @@ impl SidecarClient {
         let resp = self
             .http
             .post(self.url(&format!("/jobs/{owner}/{repo}/{number}/claim")))
-            .json(&ClaimRequest { worker_id: worker_id.to_string() })
+            .json(&ClaimRequest {
+                worker_id: worker_id.to_string(),
+            })
             .send()
             .await
             .context("claim")?;
@@ -112,7 +104,9 @@ impl SidecarClient {
     ) -> Result<()> {
         self.http
             .post(self.url(&format!("/jobs/{owner}/{repo}/{number}/heartbeat")))
-            .json(&HeartbeatRequest { worker_id: worker_id.to_string() })
+            .json(&HeartbeatRequest {
+                worker_id: worker_id.to_string(),
+            })
             .send()
             .await
             .context("heartbeat")?
@@ -130,7 +124,9 @@ impl SidecarClient {
     ) -> Result<()> {
         self.http
             .post(self.url(&format!("/jobs/{owner}/{repo}/{number}/complete")))
-            .json(&CompleteRequest { worker_id: worker_id.to_string() })
+            .json(&CompleteRequest {
+                worker_id: worker_id.to_string(),
+            })
             .send()
             .await
             .context("complete")?
@@ -148,7 +144,9 @@ impl SidecarClient {
     ) -> Result<()> {
         self.http
             .post(self.url(&format!("/jobs/{owner}/{repo}/{number}/abandon")))
-            .json(&AbandonRequest { worker_id: worker_id.to_string() })
+            .json(&AbandonRequest {
+                worker_id: worker_id.to_string(),
+            })
             .send()
             .await
             .context("abandon")?
@@ -168,7 +166,11 @@ impl SidecarClient {
     ) -> Result<()> {
         self.http
             .post(self.url(&format!("/jobs/{owner}/{repo}/{number}/fail")))
-            .json(&FailRequest { worker_id: worker_id.to_string(), reason, logs })
+            .json(&FailRequest {
+                worker_id: worker_id.to_string(),
+                reason,
+                logs,
+            })
             .send()
             .await
             .context("fail")?

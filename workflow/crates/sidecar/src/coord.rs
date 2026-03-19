@@ -57,7 +57,12 @@ impl Coordinator {
             .await
             .context("create workflow-dispatch-journal KV bucket")?;
 
-        Ok(Self { kv_claims, kv_dedup, kv_journal, nats: client })
+        Ok(Self {
+            kv_claims,
+            kv_dedup,
+            kv_journal,
+            nats: client,
+        })
     }
 
     /// Returns a reference to the raw NATS client for publishing events.
@@ -145,10 +150,7 @@ impl Coordinator {
 
     /// Release a claim (soft-delete the KV entry).
     pub async fn release(&self, key: &str) -> Result<()> {
-        self.kv_claims
-            .delete(key)
-            .await
-            .context("release claim")?;
+        self.kv_claims.delete(key).await.context("release claim")?;
         Ok(())
     }
 
@@ -179,11 +181,7 @@ impl Coordinator {
     // ── NATS pub/sub ─────────────────────────────────────────────────────────
 
     /// Publish a webhook event to `workflow.events.issue.{action}`.
-    pub async fn publish_event(
-        &self,
-        action: &str,
-        payload: Bytes,
-    ) -> Result<()> {
+    pub async fn publish_event(&self, action: &str, payload: Bytes) -> Result<()> {
         let subject = format!("workflow.events.issue.{action}");
         self.nats
             .publish(subject, payload)
@@ -263,10 +261,7 @@ impl Coordinator {
             Ok(payload) => {
                 if let Err(e) = self
                     .nats
-                    .publish(
-                        "workflow.jobs.transition",
-                        Bytes::from(payload),
-                    )
+                    .publish("workflow.jobs.transition", Bytes::from(payload))
                     .await
                 {
                     tracing::warn!(

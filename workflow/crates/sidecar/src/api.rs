@@ -7,9 +7,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 use workflow_types::{
     AbandonRequest, ClaimRequest, ClaimResponse, CompleteRequest, CreateIssueRequest,
-    CreateIssueResponse, DepsResponse, FailRequest, FactoryListResponse, HeartbeatRequest,
-    Job, JobListResponse, JobResponse, JobState, JobTransition, JournalResponse,
-    LabelListResponse, RequeueRequest, RequeueTarget, UserListResponse, WorkerListResponse,
+    CreateIssueResponse, DepsResponse, FactoryListResponse, FailRequest, HeartbeatRequest, Job,
+    JobListResponse, JobResponse, JobState, JobTransition, JournalResponse, LabelListResponse,
+    RequeueRequest, RequeueTarget, UserListResponse, WorkerListResponse,
 };
 
 use crate::error::AppError;
@@ -51,7 +51,11 @@ pub async fn get_job(
     let key = format!("{owner}/{repo}/{number}");
     let job = s.graph.get_job(&key)?.ok_or(AppError::NotFound)?;
     let claim = s.coord.get_claim(&key).await?;
-    Ok(Json(JobResponse { job, claim, failure: None }))
+    Ok(Json(JobResponse {
+        job,
+        claim,
+        failure: None,
+    }))
 }
 
 pub async fn get_deps(
@@ -70,7 +74,10 @@ pub async fn get_deps(
     }
 
     let all_done = dependencies.iter().all(|j| j.state.is_terminal());
-    Ok(Json(DepsResponse { dependencies, all_done }))
+    Ok(Json(DepsResponse {
+        dependencies,
+        all_done,
+    }))
 }
 
 // ── Job lifecycle ─────────────────────────────────────────────────────────────
@@ -91,9 +98,7 @@ pub async fn claim_job(
         )));
     }
 
-    let timeout_secs = job
-        .timeout_secs
-        .unwrap_or(s.config.default_timeout_secs);
+    let timeout_secs = job.timeout_secs.unwrap_or(s.config.default_timeout_secs);
 
     let claim = s
         .coord
@@ -112,11 +117,13 @@ pub async fn claim_job(
 
     let job = s.graph.get_job(&key)?.ok_or(AppError::NotFound)?;
 
-    s.coord.publish_transition(&JobTransition {
-        job: job.clone(),
-        previous_state: Some(JobState::OnDeck),
-        new_state: JobState::OnTheStack,
-    }).await;
+    s.coord
+        .publish_transition(&JobTransition {
+            job: job.clone(),
+            previous_state: Some(JobState::OnDeck),
+            new_state: JobState::OnTheStack,
+        })
+        .await;
 
     Ok(Json(ClaimResponse { job, claim }))
 }
@@ -129,9 +136,7 @@ pub async fn heartbeat(
     let key = format!("{owner}/{repo}/{number}");
     let ok = s.coord.heartbeat(&key, &body.worker_id).await?;
     if !ok {
-        return Err(AppError::Forbidden(
-            "not the current claim holder".into(),
-        ));
+        return Err(AppError::Forbidden("not the current claim holder".into()));
     }
     Ok(())
 }
@@ -152,11 +157,13 @@ pub async fn complete_job(
         .await?;
 
     if let Some(job) = s.graph.get_job(&key)? {
-        s.coord.publish_transition(&JobTransition {
-            job,
-            previous_state: Some(JobState::OnTheStack),
-            new_state: JobState::InReview,
-        }).await;
+        s.coord
+            .publish_transition(&JobTransition {
+                job,
+                previous_state: Some(JobState::OnTheStack),
+                new_state: JobState::InReview,
+            })
+            .await;
     }
 
     Ok(())
@@ -173,14 +180,18 @@ pub async fn abandon_job(
 
     s.coord.release(&key).await?;
     s.graph.set_state(&key, &JobState::OnDeck)?;
-    s.forgejo.set_job_state(&owner, &repo, number, &JobState::OnDeck).await?;
+    s.forgejo
+        .set_job_state(&owner, &repo, number, &JobState::OnDeck)
+        .await?;
 
     if let Some(job) = s.graph.get_job(&key)? {
-        s.coord.publish_transition(&JobTransition {
-            job,
-            previous_state: Some(JobState::OnTheStack),
-            new_state: JobState::OnDeck,
-        }).await;
+        s.coord
+            .publish_transition(&JobTransition {
+                job,
+                previous_state: Some(JobState::OnTheStack),
+                new_state: JobState::OnDeck,
+            })
+            .await;
     }
 
     Ok(())
@@ -205,17 +216,21 @@ pub async fn fail_job(
 
     s.coord.release(&key).await?;
     s.graph.set_state(&key, &JobState::Failed)?;
-    s.forgejo.set_job_state(&owner, &repo, number, &JobState::Failed).await?;
+    s.forgejo
+        .set_job_state(&owner, &repo, number, &JobState::Failed)
+        .await?;
     s.forgejo
         .post_failure_comment(&owner, &repo, number, &failure)
         .await?;
 
     if let Some(job) = s.graph.get_job(&key)? {
-        s.coord.publish_transition(&JobTransition {
-            job,
-            previous_state: Some(JobState::OnTheStack),
-            new_state: JobState::Failed,
-        }).await;
+        s.coord
+            .publish_transition(&JobTransition {
+                job,
+                previous_state: Some(JobState::OnTheStack),
+                new_state: JobState::Failed,
+            })
+            .await;
     }
 
     Ok(())
@@ -238,16 +253,20 @@ pub async fn requeue_job(
     };
 
     s.graph.set_state(&key, &new_state)?;
-    s.forgejo.set_job_state(&owner, &repo, number, &new_state).await?;
+    s.forgejo
+        .set_job_state(&owner, &repo, number, &new_state)
+        .await?;
 
     if previous_state != new_state {
         let mut updated_job = job;
         updated_job.state = new_state.clone();
-        s.coord.publish_transition(&JobTransition {
-            job: updated_job,
-            previous_state: Some(previous_state),
-            new_state,
-        }).await;
+        s.coord
+            .publish_transition(&JobTransition {
+                job: updated_job,
+                previous_state: Some(previous_state),
+                new_state,
+            })
+            .await;
     }
 
     Ok(())
@@ -282,17 +301,12 @@ pub async fn receive_webhook(
 
 // ── Factory endpoints ─────────────────────────────────────────────────────────
 
-pub async fn list_factories(
-    State(s): State<Arc<AppState>>,
-) -> Result<Json<FactoryListResponse>> {
+pub async fn list_factories(State(s): State<Arc<AppState>>) -> Result<Json<FactoryListResponse>> {
     let factories = s.registry.list_factories().await;
     Ok(Json(FactoryListResponse { factories }))
 }
 
-pub async fn poll_factory(
-    State(s): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> Result<()> {
+pub async fn poll_factory(State(s): State<Arc<AppState>>, Path(name): Path<String>) -> Result<()> {
     s.registry
         .poll_factory(&name, Arc::clone(&s))
         .await
@@ -347,20 +361,14 @@ pub async fn list_dispatch_workers(
     Ok(Json(WorkerListResponse { workers }))
 }
 
-pub async fn get_dispatch_journal(
-    State(s): State<Arc<AppState>>,
-) -> Result<Json<JournalResponse>> {
+pub async fn get_dispatch_journal(State(s): State<Arc<AppState>>) -> Result<Json<JournalResponse>> {
     let entries = s.coord.list_journal(200).await;
     Ok(Json(JournalResponse { entries }))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-async fn verify_claim_holder(
-    s: &Arc<AppState>,
-    key: &str,
-    worker_id: &str,
-) -> Result<()> {
+async fn verify_claim_holder(s: &Arc<AppState>, key: &str, worker_id: &str) -> Result<()> {
     match s.coord.get_claim(key).await? {
         Some(claim) if claim.worker_id == worker_id => Ok(()),
         Some(_) => Err(AppError::Forbidden("not the current claim holder".into())),

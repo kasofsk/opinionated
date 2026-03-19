@@ -64,12 +64,7 @@ impl ForgejoClient {
 
     // ── Issue fetch ───────────────────────────────────────────────────────────
 
-    pub async fn get_issue(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<ForgejoIssue> {
+    pub async fn get_issue(&self, owner: &str, repo: &str, number: u64) -> Result<ForgejoIssue> {
         let url = self.api(&format!("/repos/{owner}/{repo}/issues/{number}"));
         let resp = self
             .http
@@ -109,7 +104,11 @@ impl ForgejoClient {
             .http
             .post(&url)
             .header("Authorization", self.auth())
-            .json(&CreateBody { title, body, labels })
+            .json(&CreateBody {
+                title,
+                body,
+                labels,
+            })
             .send()
             .await
             .context("create issue")?
@@ -122,11 +121,7 @@ impl ForgejoClient {
 
     // ── Label listing ────────────────────────────────────────────────────────
 
-    pub async fn list_labels(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<ForgejoLabel>> {
+    pub async fn list_labels(&self, owner: &str, repo: &str) -> Result<Vec<ForgejoLabel>> {
         let url = self.api(&format!("/repos/{owner}/{repo}/labels?limit=50"));
         let labels: Vec<ForgejoLabel> = self
             .http
@@ -145,12 +140,7 @@ impl ForgejoClient {
     // ── Label management ──────────────────────────────────────────────────────
 
     /// Look up a label by name, creating it if absent. Returns the label ID.
-    pub async fn ensure_label(
-        &self,
-        owner: &str,
-        repo: &str,
-        name: &str,
-    ) -> Result<u64> {
+    pub async fn ensure_label(&self, owner: &str, repo: &str, name: &str) -> Result<u64> {
         let cache_key = (owner.to_string(), repo.to_string(), name.to_string());
 
         {
@@ -200,13 +190,7 @@ impl ForgejoClient {
         Ok(())
     }
 
-    async fn create_label(
-        &self,
-        owner: &str,
-        repo: &str,
-        name: &str,
-        color: &str,
-    ) -> Result<u64> {
+    async fn create_label(&self, owner: &str, repo: &str, name: &str, color: &str) -> Result<u64> {
         let url = self.api(&format!("/repos/{owner}/{repo}/labels"));
         let resp = self
             .http
@@ -235,8 +219,7 @@ impl ForgejoClient {
         state: &JobState,
     ) -> Result<()> {
         let new_label_name = state.label();
-        let new_label_id =
-            self.ensure_label(owner, repo, new_label_name).await?;
+        let new_label_id = self.ensure_label(owner, repo, new_label_name).await?;
 
         // Get current labels on the issue
         let issue = self.get_issue(owner, repo, number).await?;
@@ -285,7 +268,9 @@ impl ForgejoClient {
         self.http
             .patch(&url)
             .header("Authorization", self.auth())
-            .json(&EditIssueBody { assignees: Some(assignees) })
+            .json(&EditIssueBody {
+                assignees: Some(assignees),
+            })
             .send()
             .await
             .context("set assignees")?
@@ -294,12 +279,7 @@ impl ForgejoClient {
         Ok(())
     }
 
-    pub async fn clear_assignees(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<()> {
+    pub async fn clear_assignees(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
         self.set_assignees(owner, repo, number, vec![]).await
     }
 
@@ -312,8 +292,7 @@ impl ForgejoClient {
         number: u64,
         body: &str,
     ) -> Result<()> {
-        let url =
-            self.api(&format!("/repos/{owner}/{repo}/issues/{number}/comments"));
+        let url = self.api(&format!("/repos/{owner}/{repo}/issues/{number}/comments"));
         let resp = self
             .http
             .post(&url)
@@ -343,11 +322,7 @@ impl ForgejoClient {
 
     // ── Collaborators ──────────────────────────────────────────────────────────
 
-    pub async fn get_repo_collaborators(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<UserInfo>> {
+    pub async fn get_repo_collaborators(&self, owner: &str, repo: &str) -> Result<Vec<UserInfo>> {
         let url = self.api(&format!("/repos/{owner}/{repo}/collaborators"));
         let resp = self
             .http
@@ -365,15 +340,15 @@ impl ForgejoClient {
 /// Pick a consistent color for well-known label names.
 fn label_color(name: &str) -> &'static str {
     match name {
-        "status:on-ice"       => "#cccccc",
-        "status:blocked"      => "#e11d48",
-        "status:on-deck"      => "#16a34a",
+        "status:on-ice" => "#cccccc",
+        "status:blocked" => "#e11d48",
+        "status:on-deck" => "#16a34a",
         "status:on-the-stack" => "#2563eb",
-        "status:in-review"    => "#9333ea",
-        "status:rework"       => "#f59e0b",
-        "status:done"         => "#6b7280",
-        "status:failed"       => "#dc2626",
-        "status:revoked"      => "#6b7280",
-        _                     => "#ededed",
+        "status:in-review" => "#9333ea",
+        "status:rework" => "#f59e0b",
+        "status:done" => "#6b7280",
+        "status:failed" => "#dc2626",
+        "status:revoked" => "#6b7280",
+        _ => "#ededed",
     }
 }

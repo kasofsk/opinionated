@@ -50,25 +50,20 @@ impl SidecarConfig {
                     .context("DISPATCHER_FORGEJO_TOKEN required")?,
             },
             reviewer: ReviewerConfig {
-                forgejo_url: env::var("REVIEWER_FORGEJO_URL")
-                    .unwrap_or_else(|_| forgejo_url),
+                forgejo_url: env::var("REVIEWER_FORGEJO_URL").unwrap_or_else(|_| forgejo_url),
                 forgejo_token: env::var("REVIEWER_FORGEJO_TOKEN")
                     .context("REVIEWER_FORGEJO_TOKEN required")?,
-                human_login: env::var("REVIEWER_HUMAN_LOGIN")
-                    .unwrap_or_else(|_| "you".to_string()),
+                human_login: env::var("REVIEWER_HUMAN_LOGIN").unwrap_or_else(|_| "you".to_string()),
                 delay_secs: env_u64("REVIEWER_DELAY_SECS", 3),
             },
             nats: NatsConfig {
-                url: env::var("NATS_URL")
-                    .unwrap_or_else(|_| "nats://localhost:4222".to_string()),
+                url: env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string()),
             },
-            db_path: env::var("DB_PATH")
-                .unwrap_or_else(|_| "./workflow.db".to_string()),
+            db_path: env::var("DB_PATH").unwrap_or_else(|_| "./workflow.db".to_string()),
             default_timeout_secs: env_u64("DEFAULT_TIMEOUT_SECS", 3600),
             heartbeat_interval_secs: env_u64("HEARTBEAT_INTERVAL_SECS", 30),
             monitor_interval_secs: env_u64("MONITOR_INTERVAL_SECS", 60),
-            listen_addr: env::var("LISTEN_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:3000".to_string()),
+            listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string()),
         })
     }
 }
