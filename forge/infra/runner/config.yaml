@@ -9,7 +9,7 @@ runner:
 
 container:
   # Job containers join the workflow network so they can reach forgejo:3000
-  network: "workflow_default"
+  network: "forge_default"
   # Use locally available images only — don't pull from registries.
   force_pull: false
   privileged: false
