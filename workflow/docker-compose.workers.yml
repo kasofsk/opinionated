@@ -178,6 +178,7 @@ volumes:
   runner-aria-data:
   runner-blake-data:
   runner-casey-data:
+  action-cache:
 
 networks:
   default:

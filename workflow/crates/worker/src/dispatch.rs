@@ -223,6 +223,10 @@ impl<W: Worker> DispatchedWorkerLoop<W> {
                     tracing::info!(worker_id, key = %job_key, "job abandoned");
                     OutcomeReport::Abandon
                 }
+                Ok(Outcome::Yield) => {
+                    tracing::info!(worker_id, key = %job_key, "job yielded (external transition)");
+                    OutcomeReport::Yield
+                }
                 Err(e) => {
                     tracing::error!(worker_id, key = %job_key, "execute error: {e:#}");
                     OutcomeReport::Fail {

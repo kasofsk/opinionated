@@ -127,6 +127,7 @@ async fn handle_opened(
         priority,
         timeout_secs,
         capabilities: workflow_types::parse_capabilities(&issue.labels),
+        max_retries: workflow_types::parse_retries(&issue.labels),
     };
 
     // Upsert vertex and sync dep edges (enforces DAG)
@@ -214,6 +215,7 @@ async fn handle_edited(
         priority,
         timeout_secs,
         capabilities: workflow_types::parse_capabilities(&issue.labels),
+        max_retries: workflow_types::parse_retries(&issue.labels),
     };
 
     state.graph.upsert_job(&job)?;

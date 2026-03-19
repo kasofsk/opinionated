@@ -182,6 +182,8 @@ fn query_changed_issues(conn: &Connection, since_unix: i64) -> Result<Vec<IssueS
             false
         };
 
+        let has_open_pr = query_has_open_pr(conn, r.issue_id, r.number)?;
+
         snapshots.push(IssueSnapshot {
             issue_id: r.issue_id,
             repo_owner: r.repo_owner,
@@ -191,6 +193,7 @@ fn query_changed_issues(conn: &Connection, since_unix: i64) -> Result<Vec<IssueS
             body: r.body,
             is_closed: r.is_closed,
             closed_by_merge,
+            has_open_pr,
             labels,
             assignees,
             updated_unix: r.updated_unix,
@@ -256,6 +259,163 @@ fn query_closed_by_merge(conn: &Connection, issue_id: u64, issue_number: u64) ->
     Ok(exists)
 }
 
+/// Check if an open (unmerged) PR exists in the same repo with `Closes #N` in its body.
+fn query_has_open_pr(conn: &Connection, issue_id: u64, issue_number: u64) -> Result<bool> {
+    let pattern = format!("%Closes #{}%", issue_number);
+    let mut stmt = conn.prepare_cached(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM pull_request pr
+            JOIN issue pi ON pi.id = pr.issue_id
+            WHERE pi.repo_id = (SELECT repo_id FROM issue WHERE id = ?1)
+              AND pi.is_closed = 0
+              AND pr.has_merged = 0
+              AND pi.content LIKE ?2
+        )",
+    )?;
+    let exists: bool = stmt.query_row(rusqlite::params![issue_id, pattern], |row| row.get(0))?;
+    Ok(exists)
+}
+
+/// Find issue IDs that have open PRs referencing them but may not have been
+/// re-published yet (because the issue's updated_unix didn't change when the
+/// PR was created). Returns full snapshots for those issues.
+fn query_issues_with_new_prs(conn: &Connection, published_ids: &HashSet<u64>) -> Result<Vec<IssueSnapshot>> {
+    // Find issues with open PRs that we haven't already published this cycle.
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT
+            i.id,
+            r.owner_name,
+            r.name AS repo_name,
+            i.`index` AS number,
+            i.name AS title,
+            COALESCE(i.content, '') AS body,
+            i.is_closed,
+            i.updated_unix
+         FROM issue i
+         JOIN repository r ON r.id = i.repo_id
+         JOIN issue pr_issue ON pr_issue.repo_id = i.repo_id
+                            AND pr_issue.is_pull = 1
+                            AND pr_issue.is_closed = 0
+         JOIN pull_request pr ON pr.issue_id = pr_issue.id
+                             AND pr.has_merged = 0
+         WHERE i.is_pull = 0
+           AND pr_issue.content LIKE '%Closes #' || i.`index` || '%'
+         ORDER BY i.updated_unix ASC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(IssueRow {
+            issue_id: row.get(0)?,
+            repo_owner: row.get(1)?,
+            repo_name: row.get(2)?,
+            number: row.get(3)?,
+            title: row.get(4)?,
+            body: row.get(5)?,
+            is_closed: row.get::<_, i32>(6)? != 0,
+            updated_unix: row.get(7)?,
+        })
+    })?;
+
+    let mut snapshots = Vec::new();
+    for row in rows {
+        let r = row?;
+        if published_ids.contains(&r.issue_id) {
+            continue; // Already published this cycle
+        }
+        let labels = query_labels(conn, r.issue_id)?;
+        let assignees = query_assignees(conn, r.issue_id)?;
+        let closed_by_merge = if r.is_closed {
+            query_closed_by_merge(conn, r.issue_id, r.number)?
+        } else {
+            false
+        };
+
+        snapshots.push(IssueSnapshot {
+            issue_id: r.issue_id,
+            repo_owner: r.repo_owner,
+            repo_name: r.repo_name,
+            number: r.number,
+            title: r.title,
+            body: r.body,
+            is_closed: r.is_closed,
+            closed_by_merge,
+            has_open_pr: true, // We know it has one — that's how we found it
+            labels,
+            assignees,
+            updated_unix: r.updated_unix,
+        });
+    }
+
+    Ok(snapshots)
+}
+
+/// Find closed issues that still have a non-done status label. These need
+/// re-publishing so the consumer can transition them to Done or Revoked.
+fn query_closed_not_done(conn: &Connection, published_ids: &HashSet<u64>) -> Result<Vec<IssueSnapshot>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT
+            i.id,
+            r.owner_name,
+            r.name AS repo_name,
+            i.`index` AS number,
+            i.name AS title,
+            COALESCE(i.content, '') AS body,
+            i.is_closed,
+            i.updated_unix
+         FROM issue i
+         JOIN repository r ON r.id = i.repo_id
+         JOIN issue_label il ON il.issue_id = i.id
+         JOIN label l ON l.id = il.label_id
+         WHERE i.is_pull = 0
+           AND i.is_closed = 1
+           AND l.name LIKE 'status:%'
+           AND l.name NOT IN ('status:done', 'status:revoked')
+         ORDER BY i.updated_unix ASC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(IssueRow {
+            issue_id: row.get(0)?,
+            repo_owner: row.get(1)?,
+            repo_name: row.get(2)?,
+            number: row.get(3)?,
+            title: row.get(4)?,
+            body: row.get(5)?,
+            is_closed: row.get::<_, i32>(6)? != 0,
+            updated_unix: row.get(7)?,
+        })
+    })?;
+
+    let mut snapshots = Vec::new();
+    for row in rows {
+        let r = row?;
+        if published_ids.contains(&r.issue_id) {
+            continue;
+        }
+        let labels = query_labels(conn, r.issue_id)?;
+        let assignees = query_assignees(conn, r.issue_id)?;
+        let closed_by_merge = query_closed_by_merge(conn, r.issue_id, r.number)?;
+
+        snapshots.push(IssueSnapshot {
+            issue_id: r.issue_id,
+            repo_owner: r.repo_owner,
+            repo_name: r.repo_name,
+            number: r.number,
+            title: r.title,
+            body: r.body,
+            is_closed: r.is_closed,
+            closed_by_merge,
+            has_open_pr: false,
+            labels,
+            assignees,
+            updated_unix: r.updated_unix,
+        });
+    }
+
+    Ok(snapshots)
+}
+
 // ── NATS publish ────────────────────────────────────────────────────────────
 
 async fn poll_and_publish(
@@ -266,6 +426,7 @@ async fn poll_and_publish(
 ) -> Result<usize> {
     let snapshots = query_changed_issues(conn, *cursor)?;
     let mut published = 0;
+    let mut published_ids: HashSet<u64> = HashSet::new();
 
     for snap in &snapshots {
         // Skip issues we already published at this exact timestamp.
@@ -285,6 +446,45 @@ async fn poll_and_publish(
             *cursor = snap.updated_unix;
             seen_at_cursor.clear();
         }
+        seen_at_cursor.insert(snap.issue_id);
+        published_ids.insert(snap.issue_id);
+        published += 1;
+    }
+
+    // Also check for issues that have new open PRs (PR creation doesn't
+    // update the issue's updated_unix, so the cursor-based query misses them).
+    let pr_snapshots = query_issues_with_new_prs(conn, &published_ids)?;
+    for snap in &pr_snapshots {
+        if seen_at_cursor.contains(&snap.issue_id) {
+            continue;
+        }
+
+        let payload = serde_json::to_vec(snap)?;
+        js.publish(SUBJECT, payload.into())
+            .await
+            .context("publish PR-triggered snapshot to NATS")?
+            .await
+            .context("ack from NATS")?;
+
+        seen_at_cursor.insert(snap.issue_id);
+        published += 1;
+    }
+
+    // Re-publish snapshots for closed+merged issues that still have a
+    // non-done label (the consumer may have missed the close event).
+    let stale_closed = query_closed_not_done(conn, &published_ids)?;
+    for snap in &stale_closed {
+        if seen_at_cursor.contains(&snap.issue_id) {
+            continue;
+        }
+
+        let payload = serde_json::to_vec(snap)?;
+        js.publish(SUBJECT, payload.into())
+            .await
+            .context("publish stale-closed snapshot to NATS")?
+            .await
+            .context("ack from NATS")?;
+
         seen_at_cursor.insert(snap.issue_id);
         published += 1;
     }

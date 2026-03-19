@@ -72,6 +72,13 @@ pub struct Job {
     /// Required capabilities from `capability:X` labels. Empty = any worker.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Max retry attempts from `retry:N` label. Default 3.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+}
+
+fn default_max_retries() -> u32 {
+    3
 }
 
 impl Job {
@@ -317,6 +324,8 @@ pub enum OutcomeReport {
     Complete,
     Fail { reason: String, logs: Option<String> },
     Abandon,
+    /// Release claim without changing state; an external signal handles the transition.
+    Yield,
 }
 
 /// Worker reports the outcome of an assigned job via NATS.
@@ -394,6 +403,9 @@ pub struct IssueSnapshot {
     /// True if a merged PR in the same repo references `Closes #N` for this issue.
     #[serde(default)]
     pub closed_by_merge: bool,
+    /// True if an open (unmerged) PR referencing `Closes #N` exists for this issue.
+    #[serde(default)]
+    pub has_open_pr: bool,
     /// Label names attached to this issue.
     pub labels: Vec<String>,
     /// Assignee login names.
@@ -480,6 +492,18 @@ pub fn parse_timeout(labels: &[ForgejoLabel]) -> Option<u64> {
         }
     }
     None
+}
+
+/// Parse `retry:N` label, returning N (default 3 if absent).
+pub fn parse_retries(labels: &[ForgejoLabel]) -> u32 {
+    for label in labels {
+        if let Some(rest) = label.name.strip_prefix("retry:") {
+            if let Ok(n) = rest.trim().parse::<u32>() {
+                return n;
+            }
+        }
+    }
+    3 // default
 }
 
 /// Parse `capability:X` labels, returning all capability tags.

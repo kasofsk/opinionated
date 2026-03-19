@@ -43,6 +43,8 @@ pub struct AppState {
     pub dispatch_registry: Arc<DashMap<String, WorkerInfo>>,
     /// Rework routing: job_key → preferred worker_id (the original assignee).
     pub pending_reworks: DashMap<String, String>,
+    /// Retry counts: job_key → number of failed attempts so far.
+    pub retry_counts: DashMap<String, u32>,
 }
 
 impl AppState {
@@ -88,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         graph, coord, forgejo, dispatcher_forgejo, config,
         registry, dispatch_registry, pending_reworks,
+        retry_counts: DashMap::new(),
     });
 
     // Start dispatcher (subscribes to NATS events independently)

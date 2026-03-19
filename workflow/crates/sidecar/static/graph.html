@@ -749,8 +749,19 @@
       <textarea id="new-issue-body" placeholder="Describe the issue…"></textarea>
     </div>
     <div class="field">
-      <label>Labels</label>
-      <div id="new-issue-labels">Loading…</div>
+      <label>Dependencies</label>
+      <input id="new-issue-deps" type="text" placeholder="#1, #2, …">
+    </div>
+    <div class="field">
+      <label>Initial State</label>
+      <div id="new-issue-state" style="display:flex;gap:12px;margin-top:4px;">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="ni-state" value="on-ice" checked> On-Ice
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="ni-state" value="on-deck"> On-Deck
+        </label>
+      </div>
     </div>
     <div id="new-issue-status"></div>
     <button id="new-issue-submit" onclick="submitNewIssue()">Create Issue</button>
@@ -1591,7 +1602,11 @@ function toggleNewIssuePanel() {
   if (isOpen) {
     document.getElementById('new-issue-title').value = '';
     document.getElementById('new-issue-body').value = '';
+    document.getElementById('new-issue-deps').value = '';
     document.getElementById('new-issue-status').textContent = '';
+    // Reset radio to on-ice
+    const onIce = document.querySelector('input[name="ni-state"][value="on-ice"]');
+    if (onIce) onIce.checked = true;
     loadLabelsForNewIssue();
   }
 }
@@ -1599,31 +1614,17 @@ function toggleNewIssuePanel() {
 async function loadLabelsForNewIssue() {
   const repo = document.getElementById('repo-select').value;
   if (!repo) return;
-  const container = document.getElementById('new-issue-labels');
-  container.innerHTML = 'Loading\u2026';
   try {
     const [owner, name] = repo.split('/');
     const resp = await fetch(`/repos/${owner}/${name}/labels`);
     const data = await resp.json();
+    // Cache status label IDs for the radio selection
     newIssueLabelCache = {};
-    container.innerHTML = '';
     for (const label of data.labels) {
-      // skip status: labels — those are managed by the sidecar
-      if (label.name.startsWith('status:')) continue;
-      newIssueLabelCache[label.id] = label;
-      const chip = document.createElement('span');
-      chip.className = 'ni-label-chip';
-      chip.dataset.id = label.id;
-      const color = label.color.startsWith('#') ? label.color : `#${label.color}`;
-      chip.innerHTML = `<span class="ni-dot" style="background:${color}"></span>${label.name}`;
-      chip.onclick = () => chip.classList.toggle('selected');
-      container.appendChild(chip);
-    }
-    if (container.children.length === 0) {
-      container.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:12px">No labels available</span>';
+      newIssueLabelCache[label.name] = label.id;
     }
   } catch (e) {
-    container.innerHTML = '<span style="color:#e74c3c;font-size:12px">Failed to load labels</span>';
+    console.warn('Failed to load labels', e);
   }
 }
 
@@ -1631,7 +1632,9 @@ async function submitNewIssue() {
   const repo = document.getElementById('repo-select').value;
   if (!repo) return;
   const title = document.getElementById('new-issue-title').value.trim();
-  const body = document.getElementById('new-issue-body').value;
+  let body = document.getElementById('new-issue-body').value;
+  const depsRaw = document.getElementById('new-issue-deps').value.trim();
+  const stateRadio = document.querySelector('input[name="ni-state"]:checked');
   const statusEl = document.getElementById('new-issue-status');
   const btn = document.getElementById('new-issue-submit');
 
@@ -1641,8 +1644,23 @@ async function submitNewIssue() {
     return;
   }
 
-  const selectedLabels = [...document.querySelectorAll('.ni-label-chip.selected')]
-    .map(el => Number(el.dataset.id));
+  // Parse deps: "#1, #2" or "1, 2" → [1, 2]
+  const depNumbers = depsRaw
+    ? depsRaw.split(/[,\s]+/).map(s => parseInt(s.replace('#', ''), 10)).filter(n => n > 0)
+    : [];
+
+  // Append visible deps section + hidden marker to body
+  if (depNumbers.length > 0) {
+    const depLinks = depNumbers.map(n => `- #${n}`).join('\n');
+    const depCsv = depNumbers.join(',');
+    body = `${body}\n\n## Dependencies\n\n${depLinks}\n\n<!-- workflow:deps:${depCsv} -->`;
+  }
+
+  // Determine status label from radio
+  const stateName = stateRadio ? stateRadio.value : 'on-ice';
+  const labelKey = `status:${stateName}`;
+  const labelId = newIssueLabelCache[labelKey];
+  const selectedLabels = labelId ? [labelId] : [];
 
   btn.disabled = true;
   statusEl.className = '';
@@ -1659,9 +1677,14 @@ async function submitNewIssue() {
     const data = await resp.json();
     statusEl.className = 'success';
     statusEl.textContent = `Created #${data.number}`;
-    document.getElementById('new-issue-title').value = '';
-    document.getElementById('new-issue-body').value = '';
-    document.querySelectorAll('.ni-label-chip.selected').forEach(el => el.classList.remove('selected'));
+
+    // Auto-close panel after 1.5s
+    setTimeout(() => {
+      const panel = document.getElementById('new-issue-panel');
+      if (panel.classList.contains('open')) {
+        panel.classList.remove('open');
+      }
+    }, 1500);
   } catch (e) {
     statusEl.className = 'error';
     statusEl.textContent = `Error: ${e.message}`;
@@ -1738,9 +1761,43 @@ document.getElementById('detail-close').addEventListener('click', () => {
     const hasRemovedNodes = [...currentNodeIds].some(id => !newJobIds.has(id));
 
     if (hasNewNodes || hasRemovedNodes) {
-      // Structural change — rebuild the full graph
+      // Structural change — add/remove nodes incrementally to preserve zoom/pan
       populateRepoSelect(document.getElementById('repo-filter').value.trim());
-      renderGraph(filtered);
+
+      // Remove nodes that no longer exist
+      for (const id of currentNodeIds) {
+        if (!newJobIds.has(id)) {
+          const w = document.getElementById(`widget-${CSS.escape(id)}`);
+          if (w) w.remove();
+          cy.remove(cy.getElementById(id));
+        }
+      }
+
+      // Add new nodes + edges
+      const { nodes: allNodes, edges: allEdges } = buildGraph(filtered);
+      for (const n of allNodes) {
+        if (!currentNodeIds.has(n.data.id)) {
+          cy.add(n);
+        }
+      }
+      // Rebuild all edges (simpler than diffing)
+      cy.edges().remove();
+      for (const e of allEdges) cy.add(e);
+
+      // Re-run layout but preserve viewport
+      const zoom = cy.zoom();
+      const pan = { ...cy.pan() };
+      cy.layout({
+        name: 'dagre', rankDir: 'LR',
+        nodeSep: 40, rankSep: 60, edgeSep: 20,
+        animate: true, animationDuration: 300,
+      }).run();
+      // Restore viewport after layout settles
+      setTimeout(() => {
+        cy.zoom(zoom);
+        cy.pan(pan);
+        updateWidgets();
+      }, 350);
     } else {
       // Just update existing node data in place
       for (const j of filtered) {

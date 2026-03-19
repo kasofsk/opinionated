@@ -1,107 +1,79 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use forgejo_api::apis::configuration::Configuration;
+use reqwest::header;
+use forgejo_api::apis::{issue_api, repository_api};
+use forgejo_api::models;
 
 /// Forgejo client scoped to content operations safe for workers to perform
 /// after they hold an exclusive claim.
 ///
+/// Wraps the generated `forgejo-api` client with ergonomic methods.
 /// Workers never touch state labels or assignees — those are owned by the
-/// sidecar. This client handles: reading issue bodies, posting comments,
-/// branch/PR operations, and other content ops.
+/// sidecar.
 #[derive(Clone)]
 pub struct ForgejoClient {
-    base_url: String,
-    token: String,
-    http: Client,
+    config: Configuration,
 }
 
-// ── Forgejo API types ─────────────────────────────────────────────────────────
+// ── Re-export generated types we expose in our public API ────────────────────
 
-#[derive(Deserialize)]
-pub struct Issue {
-    pub number: u64,
-    pub title: String,
-    pub body: Option<String>,
-    pub state: String,
-}
+pub use forgejo_api::models::Branch;
+pub use forgejo_api::models::ChangedFile;
+pub use forgejo_api::models::Comment;
+pub use forgejo_api::models::Issue;
+pub use forgejo_api::models::Label as RepoLabel;
+pub use forgejo_api::models::PullRequest;
 
-#[derive(Deserialize)]
-pub struct Comment {
+/// Simplified action run info extracted from the generated model.
+#[derive(Debug, Clone)]
+pub struct ActionRun {
     pub id: u64,
-    pub body: String,
-}
-
-#[derive(Deserialize)]
-pub struct Branch {
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-pub struct PullRequest {
-    pub number: u64,
-    pub title: String,
-    pub body: Option<String>,
-    pub html_url: String,
-    pub state: String,
-    #[serde(default)]
-    pub merged: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RepoLabel {
-    pub id: u64,
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-pub struct ChangedFile {
-    pub filename: String,
     pub status: String,
-    pub additions: u64,
-    pub deletions: u64,
 }
 
-#[derive(Serialize)]
-struct CreateCommentBody<'a> {
-    body: &'a str,
-}
+impl ActionRun {
+    pub fn is_completed(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "success" | "failure" | "cancelled" | "skipped"
+        )
+    }
 
-#[derive(Serialize)]
-pub struct CreateBranchBody<'a> {
-    pub new_branch_name: &'a str,
-    pub old_branch_name: &'a str,
-}
-
-#[derive(Serialize)]
-pub struct CreatePrBody<'a> {
-    pub title: &'a str,
-    pub body: &'a str,
-    pub head: &'a str,
-    pub base: &'a str,
+    pub fn is_success(&self) -> bool {
+        self.status == "success"
+    }
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
 
 impl ForgejoClient {
     pub fn new(base_url: &str, token: &str) -> Self {
+        let base = base_url.trim_end_matches('/');
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            token: token.to_string(),
-            http: Client::new(),
+            config: Configuration {
+                base_path: format!("{base}/api/v1"),
+                // Bake the token into the reqwest client's default headers.
+                // This avoids the generated code's broken query-param auth
+                // (it only adds query params when api_key is Some).
+                client: reqwest::Client::builder()
+                    .default_headers({
+                        let mut h = header::HeaderMap::new();
+                        h.insert(
+                            header::AUTHORIZATION,
+                            header::HeaderValue::from_str(&format!("token {token}"))
+                                .expect("invalid token"),
+                        );
+                        h
+                    })
+                    .build()
+                    .expect("build http client"),
+                ..Configuration::default()
+            },
         }
-    }
-
-    fn api(&self, path: &str) -> String {
-        format!("{}/api/v1{}", self.base_url, path)
-    }
-
-    fn auth(&self) -> String {
-        format!("token {}", self.token)
     }
 
     // ── Issue creation / editing ──────────────────────────────────────────────
 
-    /// Create a new issue and return its issue number.
     pub async fn create_issue(
         &self,
         owner: &str,
@@ -112,7 +84,6 @@ impl ForgejoClient {
         self.create_issue_with_labels(owner, repo, title, body, &[]).await
     }
 
-    /// Create a new issue with labels (by ID) and return its issue number.
     pub async fn create_issue_with_labels(
         &self,
         owner: &str,
@@ -121,79 +92,45 @@ impl ForgejoClient {
         body: &str,
         labels: &[u64],
     ) -> Result<u64> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            title: &'a str,
-            body: &'a str,
-            #[serde(skip_serializing_if = "<[u64]>::is_empty")]
-            labels: &'a [u64],
-        }
-        #[derive(serde::Deserialize)]
-        struct Created {
-            number: u64,
-        }
-        let url = self.api(&format!("/repos/{owner}/{repo}/issues"));
-        let resp: Created = self
-            .http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { title, body, labels })
-            .send()
+        let opts = models::CreateIssueOption {
+            title: title.to_string(),
+            body: Some(body.to_string()),
+            labels: Some(labels.iter().map(|&id| id as i64).collect()),
+            ..Default::default()
+        };
+        let issue = issue_api::issue_create_issue(&self.config, owner, repo, Some(opts))
             .await
-            .context("create issue")?
-            .error_for_status()
-            .context("create issue response")?
-            .json()
-            .await?;
-        Ok(resp.number)
+            .context("create issue")?;
+        Ok(issue.number.unwrap_or(0) as u64)
     }
 
-    /// List all labels defined on a repository.
     pub async fn list_repo_labels(
         &self,
         owner: &str,
         repo: &str,
     ) -> Result<Vec<RepoLabel>> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/labels?limit=50"));
-        let labels: Vec<RepoLabel> = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
+        let labels = issue_api::issue_list_labels(&self.config, owner, repo, None, None, Some(50))
             .await
-            .context("list repo labels")?
-            .error_for_status()
-            .context("list repo labels response")?
-            .json()
-            .await?;
+            .context("list repo labels")?;
         Ok(labels)
     }
 
-    /// Close an issue (sets state to "closed").
     pub async fn close_issue(
         &self,
         owner: &str,
         repo: &str,
         number: u64,
     ) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body {
-            state: &'static str,
-        }
-        let url = self.api(&format!("/repos/{owner}/{repo}/issues/{number}"));
-        self.http
-            .patch(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { state: "closed" })
-            .send()
+        let opts = models::EditIssueOption {
+            state: Some("closed".to_string()),
+            ..Default::default()
+        };
+        issue_api::issue_edit_issue(&self.config, owner, repo, number as i64, Some(opts))
             .await
-            .context("close issue")?
-            .error_for_status()
-            .context("close issue response")?;
+            .context("close issue")?;
         Ok(())
     }
 
-    /// Overwrite the body of an existing issue.
     pub async fn edit_issue_body(
         &self,
         owner: &str,
@@ -201,20 +138,13 @@ impl ForgejoClient {
         number: u64,
         body: &str,
     ) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            body: &'a str,
-        }
-        let url = self.api(&format!("/repos/{owner}/{repo}/issues/{number}"));
-        self.http
-            .patch(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { body })
-            .send()
+        let opts = models::EditIssueOption {
+            body: Some(body.to_string()),
+            ..Default::default()
+        };
+        issue_api::issue_edit_issue(&self.config, owner, repo, number as i64, Some(opts))
             .await
-            .context("edit issue body")?
-            .error_for_status()
-            .context("edit issue body response")?;
+            .context("edit issue body")?;
         Ok(())
     }
 
@@ -226,19 +156,9 @@ impl ForgejoClient {
         repo: &str,
         number: u64,
     ) -> Result<Issue> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/issues/{number}"));
-        let issue: Issue = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
+        issue_api::issue_get_issue(&self.config, owner, repo, number as i64)
             .await
-            .context("get issue")?
-            .error_for_status()
-            .context("get issue response")?
-            .json()
-            .await?;
-        Ok(issue)
+            .context("get issue")
     }
 
     pub async fn get_issue_body(
@@ -257,20 +177,12 @@ impl ForgejoClient {
         repo: &str,
         number: u64,
     ) -> Result<Vec<Comment>> {
-        let url =
-            self.api(&format!("/repos/{owner}/{repo}/issues/{number}/comments"));
-        let comments: Vec<Comment> = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
-            .await
-            .context("list comments")?
-            .error_for_status()
-            .context("list comments response")?
-            .json()
-            .await?;
-        Ok(comments)
+        issue_api::issue_get_comments(
+            &self.config, owner, repo, number as i64,
+            None, None,
+        )
+        .await
+        .context("list comments")
     }
 
     pub async fn post_comment(
@@ -280,17 +192,13 @@ impl ForgejoClient {
         number: u64,
         body: &str,
     ) -> Result<()> {
-        let url =
-            self.api(&format!("/repos/{owner}/{repo}/issues/{number}/comments"));
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&CreateCommentBody { body })
-            .send()
+        let opts = models::CreateIssueCommentOption {
+            body: body.to_string(),
+            ..Default::default()
+        };
+        issue_api::issue_create_comment(&self.config, owner, repo, number as i64, Some(opts))
             .await
-            .context("post comment")?
-            .error_for_status()
-            .context("post comment response")?;
+            .context("post comment")?;
         Ok(())
     }
 
@@ -301,19 +209,9 @@ impl ForgejoClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<Branch>> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/branches"));
-        let branches: Vec<Branch> = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
+        repository_api::repo_list_branches(&self.config, owner, repo, None, None)
             .await
-            .context("list branches")?
-            .error_for_status()
-            .context("list branches response")?
-            .json()
-            .await?;
-        Ok(branches)
+            .context("list branches")
     }
 
     pub async fn create_branch(
@@ -323,19 +221,14 @@ impl ForgejoClient {
         new_branch: &str,
         from_branch: &str,
     ) -> Result<()> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/branches"));
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&CreateBranchBody {
-                new_branch_name: new_branch,
-                old_branch_name: from_branch,
-            })
-            .send()
+        let opts = models::CreateBranchRepoOption {
+            new_branch_name: new_branch.to_string(),
+            old_branch_name: Some(from_branch.to_string()),
+            old_ref_name: Some(from_branch.to_string()),
+        };
+        repository_api::repo_create_branch(&self.config, owner, repo, Some(opts))
             .await
-            .context("create branch")?
-            .error_for_status()
-            .context("create branch response")?;
+            .context("create branch")?;
         Ok(())
     }
 
@@ -350,25 +243,20 @@ impl ForgejoClient {
         head: &str,
         base: &str,
     ) -> Result<PullRequest> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/pulls"));
-        let pr: PullRequest = self
-            .http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&CreatePrBody { title, body, head, base })
-            .send()
+        let opts = models::CreatePullRequestOption {
+            title: Some(title.to_string()),
+            body: Some(body.to_string()),
+            head: Some(head.to_string()),
+            base: Some(base.to_string()),
+            ..Default::default()
+        };
+        repository_api::repo_create_pull_request(&self.config, owner, repo, Some(opts))
             .await
-            .context("create PR")?
-            .error_for_status()
-            .context("create PR response")?
-            .json()
-            .await?;
-        Ok(pr)
+            .context("create PR")
     }
 
     // ── File creation ─────────────────────────────────────────────────────────
 
-    /// Create or update a file in a repository via the Forgejo contents API.
     pub async fn create_file(
         &self,
         owner: &str,
@@ -378,107 +266,64 @@ impl ForgejoClient {
         message: &str,
         branch: &str,
     ) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            content: String,
-            message: &'a str,
-            branch: &'a str,
-        }
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode(content);
-        let url = self.api(&format!("/repos/{owner}/{repo}/contents/{path}"));
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { content: encoded, message, branch })
-            .send()
+        let opts = models::CreateFileOptions {
+            content: encoded,
+            message: Some(message.to_string()),
+            branch: Some(branch.to_string()),
+            ..Default::default()
+        };
+        repository_api::repo_create_file(&self.config, owner, repo, path, opts)
             .await
-            .context("create file")?
-            .error_for_status()
-            .context("create file response")?;
+            .context("create file")?;
         Ok(())
     }
 
     // ── Repository management ─────────────────────────────────────────────────
 
-    /// Create a repository under the authenticated user's account.
     pub async fn create_repo(&self, name: &str) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            name: &'a str,
-            auto_init: bool,
-            private: bool,
-        }
-        let url = self.api("/user/repos");
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { name, auto_init: false, private: false })
-            .send()
+        let opts = models::CreateRepoOption {
+            name: name.to_string(),
+            auto_init: Some(false),
+            private: Some(false),
+            ..Default::default()
+        };
+        repository_api::create_current_user_repo(&self.config, Some(opts))
             .await
-            .context("create repo")?
-            .error_for_status()
-            .context("create repo response")?;
+            .context("create repo")?;
         Ok(())
     }
 
-    /// Delete a repository.
     pub async fn delete_repo(&self, owner: &str, repo: &str) -> Result<()> {
-        let url = self.api(&format!("/repos/{owner}/{repo}"));
-        self.http
-            .delete(&url)
-            .header("Authorization", self.auth())
-            .send()
+        repository_api::repo_delete(&self.config, owner, repo)
             .await
-            .context("delete repo")?
-            .error_for_status()
-            .context("delete repo response")?;
+            .context("delete repo")?;
         Ok(())
     }
 
-    /// Register a webhook on a repository that sends `issues` events to `target_url`.
     pub async fn create_webhook(
         &self,
         owner: &str,
         repo: &str,
         target_url: &str,
     ) -> Result<u64> {
-        #[derive(serde::Serialize)]
-        struct Config<'a> {
-            url: &'a str,
-            content_type: &'static str,
-        }
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            #[serde(rename = "type")]
-            kind: &'static str,
-            config: Config<'a>,
-            events: &'static [&'static str],
-            active: bool,
-        }
-        #[derive(serde::Deserialize)]
-        struct Created {
-            id: u64,
-        }
-        let url = self.api(&format!("/repos/{owner}/{repo}/hooks"));
-        let resp: Created = self
-            .http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body {
-                kind: "gitea",
-                config: Config { url: target_url, content_type: "json" },
-                events: &["issues"],
-                active: true,
-            })
-            .send()
+        let mut config_map = std::collections::HashMap::new();
+        config_map.insert("url".to_string(), target_url.to_string());
+        config_map.insert("content_type".to_string(), "json".to_string());
+
+        let opts = models::CreateHookOption {
+            active: Some(true),
+            branch_filter: None,
+            config: config_map,
+            events: Some(vec!["issues".to_string()]),
+            r#type: models::create_hook_option::Type::Gitea,
+            authorization_header: None,
+        };
+        let hook = repository_api::repo_create_hook(&self.config, owner, repo, Some(opts))
             .await
-            .context("create webhook")?
-            .error_for_status()
-            .context("create webhook response")?
-            .json()
-            .await?;
-        Ok(resp.id)
+            .context("create webhook")?;
+        Ok(hook.id.unwrap_or(0) as u64)
     }
 
     pub async fn get_pr(
@@ -487,45 +332,25 @@ impl ForgejoClient {
         repo: &str,
         number: u64,
     ) -> Result<PullRequest> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/pulls/{number}"));
-        let pr: PullRequest = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
+        repository_api::repo_get_pull_request(&self.config, owner, repo, number as i64)
             .await
-            .context("get PR")?
-            .error_for_status()
-            .context("get PR response")?
-            .json()
-            .await?;
-        Ok(pr)
+            .context("get PR")
     }
 
-    /// List open PRs for a repo.
     pub async fn list_prs(
         &self,
         owner: &str,
         repo: &str,
         state: &str,
     ) -> Result<Vec<PullRequest>> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/pulls?state={state}&limit=50"));
-        let prs: Vec<PullRequest> = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
-            .await
-            .context("list PRs")?
-            .error_for_status()
-            .context("list PRs response")?
-            .json()
-            .await?;
-        Ok(prs)
+        repository_api::repo_list_pull_requests(
+            &self.config, owner, repo,
+            Some(state), None, None, None, None, None, Some(50),
+        )
+        .await
+        .context("list PRs")
     }
 
-    /// Submit a review on a pull request.
-    /// `event` should be "APPROVED" or "REQUEST_CHANGES".
     pub async fn submit_review(
         &self,
         owner: &str,
@@ -534,26 +359,19 @@ impl ForgejoClient {
         body: &str,
         event: &str,
     ) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            body: &'a str,
-            event: &'a str,
-        }
-        let url = self.api(&format!("/repos/{owner}/{repo}/pulls/{pr_number}/reviews"));
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { body, event })
-            .send()
-            .await
-            .context("submit review")?
-            .error_for_status()
-            .context("submit review response")?;
+        let opts = models::CreatePullReviewOptions {
+            body: Some(body.to_string()),
+            event: Some(event.to_string()),
+            ..Default::default()
+        };
+        repository_api::repo_create_pull_review(
+            &self.config, owner, repo, pr_number as i64, opts,
+        )
+        .await
+        .context("submit review")?;
         Ok(())
     }
 
-    /// Merge a pull request.
-    /// `merge_style` should be "merge", "squash", or "rebase".
     pub async fn merge_pr(
         &self,
         owner: &str,
@@ -561,25 +379,23 @@ impl ForgejoClient {
         pr_number: u64,
         merge_style: &str,
     ) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            #[serde(rename = "Do")]
-            do_action: &'a str,
-        }
-        let url = self.api(&format!("/repos/{owner}/{repo}/pulls/{pr_number}/merge"));
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { do_action: merge_style })
-            .send()
-            .await
-            .context("merge PR")?
-            .error_for_status()
-            .context("merge PR response")?;
+        let do_action = match merge_style {
+            "squash" => models::merge_pull_request_option::Do::Squash,
+            "rebase" => models::merge_pull_request_option::Do::Rebase,
+            _ => models::merge_pull_request_option::Do::Merge,
+        };
+        let opts = models::MergePullRequestOption {
+            r#do: do_action,
+            ..Default::default()
+        };
+        repository_api::repo_merge_pull_request(
+            &self.config, owner, repo, pr_number as i64, Some(opts),
+        )
+        .await
+        .context("merge PR")?;
         Ok(())
     }
 
-    /// Add a reviewer to a pull request.
     pub async fn add_pr_reviewer(
         &self,
         owner: &str,
@@ -587,50 +403,35 @@ impl ForgejoClient {
         pr_number: u64,
         reviewer_login: &str,
     ) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            reviewers: Vec<&'a str>,
-        }
-        let url = self.api(&format!(
-            "/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers"
-        ));
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { reviewers: vec![reviewer_login] })
-            .send()
-            .await
-            .context("add PR reviewer")?
-            .error_for_status()
-            .context("add PR reviewer response")?;
+        let opts = models::PullReviewRequestOptions {
+            reviewers: Some(vec![reviewer_login.to_string()]),
+            ..Default::default()
+        };
+        repository_api::repo_create_pull_review_requests(
+            &self.config, owner, repo, pr_number as i64, opts,
+        )
+        .await
+        .context("add PR reviewer")?;
         Ok(())
     }
 
-    /// List changed files in a pull request.
     pub async fn list_pr_files(
         &self,
         owner: &str,
         repo: &str,
         pr_number: u64,
     ) -> Result<Vec<ChangedFile>> {
-        let url = self.api(&format!("/repos/{owner}/{repo}/pulls/{pr_number}/files"));
-        let files: Vec<ChangedFile> = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
-            .await
-            .context("list PR files")?
-            .error_for_status()
-            .context("list PR files response")?
-            .json()
-            .await?;
-        Ok(files)
+        repository_api::repo_get_pull_request_files(
+            &self.config, owner, repo, pr_number as i64,
+            None, None, None, None,
+        )
+        .await
+        .context("list PR files")
     }
 
     // ── Forgejo Actions API ──────────────────────────────────────────────────
 
-    /// Trigger a workflow via `workflow_dispatch`.
+    /// Trigger a workflow and return the run ID.
     pub async fn dispatch_workflow(
         &self,
         owner: &str,
@@ -638,26 +439,18 @@ impl ForgejoClient {
         workflow: &str,
         git_ref: &str,
         inputs: &std::collections::HashMap<String, String>,
-    ) -> Result<()> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            #[serde(rename = "ref")]
-            git_ref: &'a str,
-            inputs: &'a std::collections::HashMap<String, String>,
-        }
-        let url = self.api(&format!(
-            "/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
-        ));
-        self.http
-            .post(&url)
-            .header("Authorization", self.auth())
-            .json(&Body { git_ref, inputs })
-            .send()
-            .await
-            .context("dispatch workflow")?
-            .error_for_status()
-            .context("dispatch workflow response")?;
-        Ok(())
+    ) -> Result<Option<u64>> {
+        let opts = models::DispatchWorkflowOption {
+            inputs: Some(inputs.clone()),
+            r#ref: git_ref.to_string(),
+            return_run_info: Some(true),
+        };
+        let result = repository_api::dispatch_workflow(
+            &self.config, owner, repo, workflow, Some(opts),
+        )
+        .await
+        .context("dispatch workflow")?;
+        Ok(result.id.map(|id| id as u64))
     }
 
     /// List recent action runs for a repository.
@@ -665,22 +458,21 @@ impl ForgejoClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<ActionRunList> {
-        let url = self.api(&format!(
-            "/repos/{owner}/{repo}/actions/runs?limit=10"
-        ));
-        let resp: ActionRunList = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
-            .await
-            .context("list action runs")?
-            .error_for_status()
-            .context("list action runs response")?
-            .json()
-            .await?;
-        Ok(resp)
+    ) -> Result<Vec<ActionRun>> {
+        let resp = repository_api::list_action_runs(
+            &self.config, owner, repo,
+            None, Some(10),
+            Some(vec!["workflow_dispatch".to_string()]),
+            None, None, None,
+        )
+        .await
+        .context("list action runs")?;
+        Ok(resp.workflow_runs.unwrap_or_default().iter().map(|r| {
+            ActionRun {
+                id: r.id.unwrap_or(0) as u64,
+                status: r.status.clone().unwrap_or_default(),
+            }
+        }).collect())
     }
 
     /// Get a specific action run by ID.
@@ -690,66 +482,14 @@ impl ForgejoClient {
         repo: &str,
         run_id: u64,
     ) -> Result<ActionRun> {
-        let url = self.api(&format!(
-            "/repos/{owner}/{repo}/actions/runs/{run_id}"
-        ));
-        let run: ActionRun = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
-            .await
-            .context("get action run")?
-            .error_for_status()
-            .context("get action run response")?
-            .json()
-            .await?;
-        Ok(run)
-    }
-}
-
-// ── Forgejo Actions types ────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ActionRunList {
-    pub workflow_runs: Vec<ActionRun>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActionRun {
-    pub id: u64,
-    /// Run status — Forgejo uses "waiting", "running", "success", "failure", "cancelled".
-    pub status: String,
-    /// The event type that triggered this run.
-    #[serde(default)]
-    pub trigger_event: String,
-    /// JSON-encoded event payload containing workflow_dispatch inputs.
-    #[serde(default)]
-    pub event_payload: String,
-    pub created: String,
-    #[serde(default)]
-    pub updated: String,
-    #[serde(default)]
-    pub html_url: Option<String>,
-}
-
-impl ActionRun {
-    /// Returns true if the run has finished (success, failure, or cancelled).
-    pub fn is_completed(&self) -> bool {
-        matches!(
-            self.status.as_str(),
-            "success" | "failure" | "cancelled"
+        let r = repository_api::action_run(
+            &self.config, owner, repo, run_id as i64,
         )
-    }
-
-    /// Returns true if the run succeeded.
-    pub fn is_success(&self) -> bool {
-        self.status == "success"
-    }
-
-    /// Extract `issue_number` from the workflow_dispatch event payload inputs.
-    pub fn issue_number(&self) -> Option<u64> {
-        let payload: serde_json::Value = serde_json::from_str(&self.event_payload).ok()?;
-        payload.get("inputs")?.get("issue_number")?.as_str()?.parse().ok()
+        .await
+        .context("get action run")?;
+        Ok(ActionRun {
+            id: r.id.unwrap_or(0) as u64,
+            status: r.status.unwrap_or_default(),
+        })
     }
 }

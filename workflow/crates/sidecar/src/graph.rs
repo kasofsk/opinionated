@@ -324,6 +324,7 @@ fn stub_job_from_key(key: &str) -> Option<Job> {
         priority: 50,
         timeout_secs: None,
         capabilities: vec![],
+        max_retries: 3,
     })
 }
 
@@ -351,6 +352,7 @@ mod tests {
             priority: 50,
             timeout_secs: None,
             capabilities: vec![],
+            max_retries: 3,
             }
     }
 

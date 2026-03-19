@@ -102,6 +102,41 @@ resource "gitea_repository" "workflow" {
   has_projects      = false
 }
 
+# ── Delete default labels ─────────────────────────────────────────────────────
+#
+# Forgejo creates default labels (bug, duplicate, enhancement, etc.) on new repos.
+# Remove them so only our status labels remain.
+
+resource "null_resource" "delete_default_labels" {
+  triggers = {
+    repo = "${var.repo_owner}/${gitea_repository.workflow.name}"
+  }
+
+  provisioner "local-exec" {
+    command = <<-CMD
+      # List all labels and delete any that aren't status: labels
+      curl -sf \
+        -H "Authorization: token ${var.forgejo_admin_token}" \
+        "${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/labels?limit=50" \
+      | python3 -c "
+import sys, json, subprocess
+labels = json.load(sys.stdin)
+for l in labels:
+    if not l['name'].startswith('status:') and not l['name'].startswith('priority:') \
+       and not l['name'].startswith('capability:') and not l['name'].startswith('timeout:') \
+       and not l['name'].startswith('retry:'):
+        subprocess.run([
+            'curl', '-sf', '-X', 'DELETE',
+            '-H', 'Authorization: token ${var.forgejo_admin_token}',
+            '${var.forgejo_url}/api/v1/repos/${var.repo_owner}/${gitea_repository.workflow.name}/labels/' + str(l['id'])
+        ], capture_output=True)
+" || true
+    CMD
+  }
+
+  depends_on = [gitea_repository.workflow]
+}
+
 # ── Status labels ─────────────────────────────────────────────────────────────
 #
 # The Lerentis/gitea provider has no gitea_label resource, so we use the
@@ -169,7 +204,7 @@ resource "null_resource" "labels" {
     CMD
   }
 
-  depends_on = [gitea_repository.workflow]
+  depends_on = [gitea_repository.workflow, null_resource.delete_default_labels]
 }
 
 # ── Sidecar repo access ─────────────────────────────────────────────────────

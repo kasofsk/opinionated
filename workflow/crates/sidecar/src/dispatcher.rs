@@ -414,6 +414,16 @@ impl Dispatcher {
                 JobState::InReview
             }
             OutcomeReport::Fail { reason, logs } => {
+                // Check retry count vs max_retries.
+                let attempt = {
+                    let mut entry = self.state.retry_counts.entry(key.to_string()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                let max_retries = self.state.graph.get_job(key)?
+                    .map(|j| j.max_retries)
+                    .unwrap_or(3);
+
                 let failure = FailureRecord {
                     worker_id: wo.worker_id.clone(),
                     kind: FailureKind::WorkerReported,
@@ -422,28 +432,57 @@ impl Dispatcher {
                     failed_at: Utc::now(),
                 };
 
-                self.state.graph.set_state(key, &JobState::Failed)?;
-                self.state
-                    .forgejo
-                    .set_job_state(owner, repo, number, &JobState::Failed)
-                    .await?;
+                // Post the failure comment regardless of retry.
                 self.state
                     .dispatcher_forgejo
                     .post_failure_comment(owner, repo, number, &failure)
                     .await?;
-                self.state.journal(
-                    "fail",
-                    &format!("Worker reported failure: {reason}"),
-                    Some(key),
-                    Some(&wo.worker_id),
-                ).await;
-                tracing::warn!(
-                    worker_id = %wo.worker_id,
-                    job_key = key,
-                    reason,
-                    "worker reported failure"
-                );
-                JobState::Failed
+
+                if attempt <= max_retries {
+                    // Retry: return to on-deck for re-assignment.
+                    self.state.graph.set_state(key, &JobState::OnDeck)?;
+                    self.state
+                        .forgejo
+                        .set_job_state(owner, repo, number, &JobState::OnDeck)
+                        .await?;
+                    self.state.journal(
+                        "retry",
+                        &format!("Attempt {attempt}/{max_retries} failed: {reason} — retrying"),
+                        Some(key),
+                        Some(&wo.worker_id),
+                    ).await;
+                    tracing::warn!(
+                        worker_id = %wo.worker_id,
+                        job_key = key,
+                        attempt,
+                        max_retries,
+                        reason,
+                        "job failed, retrying"
+                    );
+                    JobState::OnDeck
+                } else {
+                    // Exhausted retries — mark as permanently failed.
+                    self.state.graph.set_state(key, &JobState::Failed)?;
+                    self.state
+                        .forgejo
+                        .set_job_state(owner, repo, number, &JobState::Failed)
+                        .await?;
+                    self.state.journal(
+                        "fail",
+                        &format!("All {max_retries} retries exhausted: {reason}"),
+                        Some(key),
+                        Some(&wo.worker_id),
+                    ).await;
+                    tracing::error!(
+                        worker_id = %wo.worker_id,
+                        job_key = key,
+                        attempt,
+                        max_retries,
+                        reason,
+                        "job failed permanently — retries exhausted"
+                    );
+                    JobState::Failed
+                }
             }
             OutcomeReport::Abandon => {
                 self.state.graph.set_state(key, &JobState::OnDeck)?;
@@ -463,6 +502,23 @@ impl Dispatcher {
                     "worker abandoned job"
                 );
                 JobState::OnDeck
+            }
+            OutcomeReport::Yield => {
+                // Worker is done but state transition is delegated to an
+                // external signal (e.g. CDC detecting a PR). Just release
+                // the claim — don't touch the job state or Forgejo labels.
+                self.state.journal(
+                    "yield",
+                    &format!("Worker yielded — awaiting external transition"),
+                    Some(key),
+                    Some(&wo.worker_id),
+                ).await;
+                tracing::info!(
+                    worker_id = %wo.worker_id,
+                    job_key = key,
+                    "worker yielded job (external transition pending)"
+                );
+                JobState::OnTheStack // stays on-the-stack until CDC picks up the PR
             }
         };
 

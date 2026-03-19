@@ -16,6 +16,11 @@ use rand::Rng;
 use workflow_types::{JobState, JobTransition};
 use workflow_worker::forgejo::{ForgejoClient as ReviewerForgejoClient, PullRequest};
 
+/// Helper to extract PR number from the generated model.
+fn pr_num(pr: &PullRequest) -> u64 {
+    pr.number.unwrap_or(0) as u64
+}
+
 use crate::AppState;
 
 const SUBJECT_TRANSITION: &str = "workflow.jobs.transition";
@@ -107,8 +112,8 @@ impl Reviewer {
 
         tracing::info!(
             job_key = %job_key,
-            pr_number = pr.number,
-            "reviewer: reviewing PR #{}", pr.number
+            pr_number = pr_num(&pr),
+            "reviewer: reviewing PR #{}", pr_num(&pr)
         );
 
         // 50% chance to escalate to human
@@ -154,7 +159,7 @@ impl Reviewer {
 
         // Submit approving review.
         self.forgejo
-            .submit_review(owner, repo, pr.number, "LGTM — automated review passed.", "APPROVED")
+            .submit_review(owner, repo, pr_num(&pr), "LGTM — automated review passed.", "APPROVED")
             .await?;
 
         // Merge with retry — Forgejo may not accept the merge immediately
@@ -163,11 +168,11 @@ impl Reviewer {
         let max_attempts = 5;
         let mut merged = false;
         for attempt in 1..=max_attempts {
-            match self.forgejo.merge_pr(owner, repo, pr.number, "merge").await {
+            match self.forgejo.merge_pr(owner, repo, pr_num(&pr), "merge").await {
                 Ok(()) => { merged = true; break; }
                 Err(e) if attempt < max_attempts => {
                     tracing::debug!(
-                        pr_number = pr.number,
+                        pr_number = pr_num(&pr),
                         attempt,
                         backoff_ms = backoff.as_millis() as u64,
                         error = %e,
@@ -178,7 +183,7 @@ impl Reviewer {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        pr_number = pr.number,
+                        pr_number = pr_num(&pr),
                         error = %e,
                         "merge failed after {max_attempts} attempts, escalating to human"
                     );
@@ -193,14 +198,14 @@ impl Reviewer {
 
         self.state.journal(
             "approve",
-            &format!("Approved and merged PR #{} for job", pr.number),
+            &format!("Approved and merged PR #{} for job", pr_num(&pr)),
             Some(&job_key),
             Some("workflow-reviewer"),
         ).await;
 
         tracing::info!(
             job_key = %job_key,
-            pr_number = pr.number,
+            pr_number = pr_num(&pr),
             "reviewer: approved and merged PR"
         );
 
@@ -220,7 +225,7 @@ impl Reviewer {
 
         // Add the human as a requested reviewer.
         self.forgejo
-            .add_pr_reviewer(owner, repo, pr.number, &self.human_login)
+            .add_pr_reviewer(owner, repo, pr_num(&pr), &self.human_login)
             .await?;
 
         // Post an explanatory comment on the PR.
@@ -231,14 +236,14 @@ impl Reviewer {
             self.human_login
         );
         self.forgejo
-            .post_comment(owner, repo, pr.number, &comment)
+            .post_comment(owner, repo, pr_num(&pr), &comment)
             .await?;
 
         self.state.journal(
             "escalate",
             &format!(
                 "Escalated PR #{} to human reviewer @{}",
-                pr.number, self.human_login
+                pr_num(&pr), self.human_login
             ),
             Some(&job_key),
             Some("workflow-reviewer"),
@@ -246,7 +251,7 @@ impl Reviewer {
 
         tracing::info!(
             job_key = %job_key,
-            pr_number = pr.number,
+            pr_number = pr_num(&pr),
             human = %self.human_login,
             "reviewer: escalated to human reviewer"
         );

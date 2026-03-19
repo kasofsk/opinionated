@@ -25,6 +25,9 @@ pub enum Outcome {
     },
     /// Voluntarily return the job to `on-deck` (e.g. worker is shutting down).
     Abandon,
+    /// Worker is done but an external signal (e.g. CDC detecting a PR) will
+    /// handle the state transition. Releases the claim without changing state.
+    Yield,
 }
 
 // ── Execution context ────────────────────────────────────────────────────────
@@ -182,6 +185,12 @@ impl<W: Worker> WorkerLoop<W> {
             }
             Ok(Outcome::Abandon) => {
                 tracing::info!(worker_id, owner, repo, number, "job abandoned");
+                let _ = self.sidecar.abandon(&owner, &repo, number, &worker_id).await;
+            }
+            Ok(Outcome::Yield) => {
+                // Release claim via abandon but don't change state.
+                // An external signal (CDC detecting PR) will handle the transition.
+                tracing::info!(worker_id, owner, repo, number, "job yielded");
                 let _ = self.sidecar.abandon(&owner, &repo, number, &worker_id).await;
             }
             Err(e) => {

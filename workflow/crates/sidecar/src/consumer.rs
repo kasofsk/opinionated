@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use async_nats::jetstream::{self, consumer::PullConsumer, stream};
 use futures::StreamExt;
 use workflow_types::{
-    parse_capabilities, parse_deps, parse_priority, parse_timeout, ForgejoLabel, IssueSnapshot,
-    Job, JobState, JobTransition,
+    parse_capabilities, parse_deps, parse_priority, parse_retries, parse_timeout, ForgejoLabel,
+    IssueSnapshot, Job, JobState, JobTransition,
 };
 
 use crate::AppState;
@@ -126,6 +126,7 @@ async fn process_snapshot(state: &Arc<AppState>, snap: &IssueSnapshot) -> Result
     let priority = parse_priority(&labels);
     let timeout_secs = parse_timeout(&labels);
     let capabilities = parse_capabilities(&labels);
+    let max_retries = parse_retries(&labels);
 
     let has_status_label = snap.labels.iter().any(|l| JobState::from_label(l).is_some());
     let on_ice = snap.labels.iter().any(|l| l == "status:on-ice")
@@ -156,6 +157,9 @@ async fn process_snapshot(state: &Arc<AppState>, snap: &IssueSnapshot) -> Result
         }
     };
 
+    // Read the previous state BEFORE any writes so we can detect changes.
+    let previous_state = state.graph.get_job(&job_key)?.map(|j| j.state);
+
     let job = Job {
         repo_owner: owner.clone(),
         repo_name: repo.clone(),
@@ -167,6 +171,7 @@ async fn process_snapshot(state: &Arc<AppState>, snap: &IssueSnapshot) -> Result
         priority,
         timeout_secs,
         capabilities,
+        max_retries,
     };
 
     // Upsert the job and sync dependency edges.
@@ -188,9 +193,6 @@ async fn process_snapshot(state: &Arc<AppState>, snap: &IssueSnapshot) -> Result
             .post_comment(owner, repo, snap.number, &msg)
             .await;
     }
-
-    // Read the previous state before we write anything.
-    let previous_state = state.graph.get_job(&job_key)?.map(|j| j.state);
 
     // For closed issues: Done vs Revoked.
     if snap.is_closed {
@@ -251,6 +253,30 @@ async fn process_snapshot(state: &Arc<AppState>, snap: &IssueSnapshot) -> Result
         }
 
         // Publish transition when state changed.
+        if previous_state.as_ref() != Some(&resolved) {
+            let mut resolved_job = job.clone();
+            resolved_job.state = resolved.clone();
+            state.coord.publish_transition(&JobTransition {
+                job: resolved_job,
+                previous_state,
+                new_state: resolved,
+            }).await;
+        }
+    } else if target_state == JobState::OnTheStack && snap.has_open_pr {
+        // On-the-stack with an open PR → transition to in-review.
+        // This is the CDC-driven path: the action created a PR, the worker
+        // yielded, and now we detect the PR and complete the transition.
+        let resolved = JobState::InReview;
+        state.graph.set_state(&job_key, &resolved)?;
+
+        let forgejo_state = snap.labels.iter().find_map(|l| JobState::from_label(l));
+        if forgejo_state.as_ref() != Some(&resolved) {
+            state
+                .forgejo
+                .set_job_state(owner, repo, snap.number, &resolved)
+                .await?;
+        }
+
         if previous_state.as_ref() != Some(&resolved) {
             let mut resolved_job = job.clone();
             resolved_job.state = resolved.clone();

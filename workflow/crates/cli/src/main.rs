@@ -329,6 +329,10 @@ async fn cmd_claim(
             sidecar.abandon(owner, repo, number, &args.worker_id).await?;
             println!("→ Job returned to on-deck.");
         }
+        Outcome::Yield => {
+            sidecar.abandon(owner, repo, number, &args.worker_id).await?;
+            println!("⏳ Yielded — waiting for external transition.");
+        }
     }
     Ok(())
 }
@@ -381,8 +385,12 @@ async fn cmd_seed(
 
     // Fetch repo labels so we can apply status labels at issue creation time.
     let repo_labels = forgejo.list_repo_labels(owner, repo).await?;
-    let blocked_label_id = repo_labels.iter().find(|l| l.name == "status:blocked").map(|l| l.id);
-    let on_deck_label_id = repo_labels.iter().find(|l| l.name == "status:on-deck").map(|l| l.id);
+    let blocked_label_id = repo_labels.iter()
+        .find(|l| l.name.as_deref() == Some("status:blocked"))
+        .and_then(|l| l.id.map(|id| id as u64));
+    let on_deck_label_id = repo_labels.iter()
+        .find(|l| l.name.as_deref() == Some("status:on-deck"))
+        .and_then(|l| l.id.map(|id| id as u64));
 
     // Single pass — create each issue with deps and labels in one shot.
     // Fixtures are DAGs so all dep IDs have already been created by the time
@@ -659,8 +667,8 @@ impl Worker for ActionWorker {
         inputs.insert("forgejo_url".to_string(),
             std::env::var("FORGEJO_URL").unwrap_or_default());
 
-        // Dispatch the workflow.
-        forgejo
+        // Dispatch the workflow — returns the run ID directly.
+        let run_id = forgejo
             .dispatch_workflow(
                 &job.repo_owner,
                 &job.repo_name,
@@ -668,15 +676,8 @@ impl Worker for ActionWorker {
                 &self.git_ref,
                 &inputs,
             )
-            .await?;
-
-        tracing::info!(key = %job.key(), "workflow dispatched, polling for run");
-
-        // Brief pause then find the new run.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        // Find the run that was just created.
-        let run_id = self.find_new_run(forgejo, job).await?;
+            .await?
+            .unwrap_or(0);
 
         tracing::info!(key = %job.key(), run_id, "tracking action run");
 
@@ -698,8 +699,8 @@ impl Worker for ActionWorker {
 
             if run.is_completed() {
                 if run.is_success() {
-                    tracing::info!(key = %job.key(), run_id, "action run succeeded");
-                    return Ok(Outcome::Complete);
+                    tracing::info!(key = %job.key(), run_id, "action run succeeded, yielding to CDC");
+                    return Ok(Outcome::Yield);
                 } else {
                     let reason = format!(
                         "action run {run_id} finished with status={}",
@@ -720,41 +721,6 @@ impl Worker for ActionWorker {
     }
 }
 
-impl ActionWorker {
-    /// Find the run we just dispatched by matching issue_number in the payload.
-    /// Prefers a non-completed run; falls back to the newest matching run.
-    async fn find_new_run(
-        &self,
-        forgejo: &ForgejoClient,
-        job: &Job,
-    ) -> Result<u64> {
-        for _ in 0..15 {
-            let runs = forgejo
-                .list_action_runs(&job.repo_owner, &job.repo_name)
-                .await?;
-
-            // Find runs matching our issue number.
-            let matching: Vec<_> = runs
-                .workflow_runs
-                .iter()
-                .filter(|r| r.issue_number() == Some(job.number))
-                .collect();
-
-            // Prefer a run that's still in progress.
-            if let Some(run) = matching.iter().find(|r| !r.is_completed()) {
-                return Ok(run.id);
-            }
-            // Otherwise take the newest matching run (highest ID = just created).
-            if let Some(run) = matching.iter().max_by_key(|r| r.id) {
-                return Ok(run.id);
-            }
-
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-
-        bail!("timed out waiting for action run for issue #{}", job.number)
-    }
-}
 
 // ── interactive session ───────────────────────────────────────────────────────
 
