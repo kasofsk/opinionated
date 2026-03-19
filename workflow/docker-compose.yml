@@ -1,0 +1,41 @@
+include:
+  - docker-compose.infra.yml
+
+services:
+
+  cdc:
+    image: workflow-sidecar:latest
+    command: [workflow-cdc]
+    environment:
+      DATABASE_URL: postgres://forgejo:forgejo@postgres:5432/forgejo
+      NATS_URL: nats://nats:4222
+      CDC_POLL_MS: "250"
+      RUST_LOG: workflow_cdc=info
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
+  sidecar:
+    image: workflow-sidecar:latest
+    command: [workflow-sidecar]
+    env_file: .sidecar.env
+    environment:
+      RUST_LOG: workflow_sidecar=info
+    volumes:
+      - sidecar-data:/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      cdc:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  sidecar-data:
