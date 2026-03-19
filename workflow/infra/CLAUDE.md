@@ -18,15 +18,20 @@ The gitea provider has no label resource. Labels (status labels like `on-deck`, 
 
 ## Forgejo app.ini
 
-`forgejo/app.ini` is the base Forgejo configuration. It's copied into `.data/forgejo/gitea/conf/` by `init.sh` before first boot. Includes CORS configuration so the graph viewer (served at `:8080`) can make cross-origin API calls to Forgejo (`:3000`).
+`forgejo/app.ini` is the base Forgejo configuration. It's copied into `.data/forgejo/gitea/conf/` by `init.sh` before first boot. Includes CORS configuration so the graph viewer (served at `:8080`) can make cross-origin API calls to Forgejo (`:3000`). Also enables Forgejo Actions (`[actions]` section).
 
-## Two sidecar service accounts
+## Three sidecar service accounts
 
-The sidecar uses two Forgejo identities for audit trail clarity:
+The sidecar uses three Forgejo identities for audit trail clarity:
 - **`workflow-sync`** (variable: `sidecar_login`) — label/dep management
 - **`workflow-dispatcher`** (variable: `dispatcher_login`) — assignee/comment management
+- **`workflow-reviewer`** (variable: `reviewer_login`) — PR reviews, merge, escalation comments
 
-Both are provisioned by the `forgejo-init` module and added as repo collaborators.
+All are provisioned by the `forgejo-init` module and added as repo collaborators with write permission.
+
+## Human reviewer account
+
+A **`you`** user (variable: `human_login`) is provisioned as a regular Forgejo account with write collaborator access. This is the escalation target for the automated reviewer — when it decides a PR needs human attention, it adds `you` as a PR reviewer. Log in at `localhost:3000` with the configured password to manually review and merge PRs.
 
 ## No webhooks
 
@@ -46,3 +51,5 @@ Always use `scripts/init.sh` rather than running Terraform directly — the scri
 - `forgejo_admin_password` — passed via `TF_VAR_forgejo_admin_password`
 - `sidecar_password` — passed via `TF_VAR_sidecar_password`
 - `dispatcher_password` — passed via `TF_VAR_dispatcher_password`
+- `reviewer_password` — passed via `TF_VAR_reviewer_password`
+- `human_password` — passed via `TF_VAR_human_password`

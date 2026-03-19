@@ -650,8 +650,8 @@ impl Worker for SimWorker {
         }
 
         tokio::time::sleep(Duration::from_secs(self.delay_secs)).await;
-        tracing::info!(key = %job.key(), "sim complete");
-        Ok(Outcome::Complete)
+        tracing::info!(key = %job.key(), "sim complete, yielding for review");
+        Ok(Outcome::Yield)
     }
 }
 
@@ -695,11 +695,24 @@ impl Worker for ActionWorker {
     async fn execute(&self, job: &Job, forgejo: &ForgejoClient) -> Result<Outcome> {
         let runner_label = self.runner.as_deref().unwrap_or("ubuntu-latest");
 
+        // Create a work branch so the action run is associated with it (not main).
+        let branch_name = format!("work/action/{}", job.number);
+        match forgejo
+            .create_branch(&job.repo_owner, &job.repo_name, &branch_name, &self.git_ref)
+            .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::debug!(key = %job.key(), error = %e, "branch may already exist, continuing");
+            }
+        }
+
         tracing::info!(
             key = %job.key(),
             title = %job.title,
             runner = runner_label,
             workflow = %self.workflow,
+            branch = %branch_name,
             "dispatching action"
         );
 
@@ -712,13 +725,13 @@ impl Worker for ActionWorker {
             std::env::var("FORGEJO_URL").unwrap_or_default(),
         );
 
-        // Dispatch the workflow — returns the run ID directly.
+        // Dispatch the workflow on the work branch so the run is tied to it.
         let run_id = forgejo
             .dispatch_workflow(
                 &job.repo_owner,
                 &job.repo_name,
                 &self.workflow,
-                &self.git_ref,
+                &branch_name,
                 &inputs,
             )
             .await?

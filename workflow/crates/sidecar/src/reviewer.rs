@@ -1,8 +1,8 @@
 //! Reviewer: automated PR review triggered by InReview transitions.
 //!
 //! Subscribes to `workflow.jobs.transition` and reacts when a job moves to
-//! InReview. Finds the linked PR, then either approves+merges or escalates
-//! to a human reviewer (50% random probability).
+//! InReview. Finds the linked PR, then either approves+merges (80%) or
+//! escalates to a human reviewer (20% random probability).
 //!
 //! This is NOT a worker — it doesn't claim jobs. It acts in a supervisory
 //! capacity, similar to the dispatcher.
@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use dashmap::DashSet;
 use futures::StreamExt;
 use rand::Rng;
 use workflow_types::{JobState, JobTransition};
@@ -33,6 +34,9 @@ pub struct Reviewer {
     human_login: String,
     /// Delay before acting on a review (seconds).
     delay_secs: u64,
+    /// Job keys currently being reviewed — prevents double-handling from
+    /// duplicate InReview transitions (CDC path + dispatcher path).
+    in_flight: DashSet<String>,
 }
 
 impl Reviewer {
@@ -47,6 +51,7 @@ impl Reviewer {
             forgejo,
             human_login,
             delay_secs,
+            in_flight: DashSet::new(),
         }
     }
 
@@ -75,15 +80,23 @@ impl Reviewer {
                     continue;
                 }
 
+                let job_key = transition.job.key();
+                if !reviewer.in_flight.insert(job_key.clone()) {
+                    tracing::debug!(job_key = %job_key, "reviewer: already handling, skipping duplicate");
+                    continue;
+                }
+
                 let reviewer = Arc::clone(&reviewer);
                 tokio::spawn(async move {
+                    let key = transition.job.key();
                     if let Err(e) = reviewer.handle_in_review(&transition).await {
                         tracing::error!(
-                            job = %transition.job.key(),
+                            job = %key,
                             error = %e,
                             "reviewer: failed to handle in-review"
                         );
                     }
+                    reviewer.in_flight.remove(&key);
                 });
             }
         });
@@ -121,8 +134,8 @@ impl Reviewer {
             "reviewer: reviewing PR #{}", pr_num(&pr)
         );
 
-        // 50% chance to escalate to human
-        let escalate = rand::rng().random_bool(0.5);
+        // 20% chance to escalate to human
+        let escalate = rand::rng().random_bool(0.2);
 
         if escalate {
             self.escalate_to_human(owner, repo, job.number, &pr).await?;

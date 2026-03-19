@@ -78,7 +78,7 @@ Centralized worker assignment. Subscribes to:
 - `workflow.dispatch.register` — worker registration with capabilities
 - `workflow.dispatch.idle` — worker ready for work
 - `workflow.dispatch.heartbeat` — forwards to coordinator for claim keepalive
-- `workflow.dispatch.outcome` — handles complete/fail/abandon (release claim, update graph, sync Forgejo)
+- `workflow.dispatch.outcome` — handles complete/fail/abandon/yield (release claim, update graph, sync Forgejo). On yield, releases the worker without publishing a transition — the CDC consumer owns the InReview transition via `has_open_pr`.
 
 Publishes to per-worker subjects:
 - `workflow.dispatch.assign.{worker_id}` — job assignment
@@ -108,12 +108,30 @@ no separate index required, no rebuild on restart.
 - All deps of job X → outbound `depends_on` edges from X's vertex
 - All deps done? → check `state == Done` on all inbound vertices
 
+### Reviewer (sidecar module)
+Automated PR reviewer. Subscribes to `workflow.jobs.transition` and reacts
+when a job enters InReview. Finds the linked PR (`Closes #N`), then either
+approves+merges (80% probability) or escalates to a configured human reviewer
+(20% probability). Uses a `DashSet` to deduplicate concurrent InReview
+transitions for the same job. Uses a separate Forgejo identity
+(`workflow-reviewer`) for audit trail clarity.
+
 ### Workers
 AI agents. Register with the dispatcher via NATS with capability tags.
 Receive job assignments pushed by the dispatcher. Execute work using Forgejo
-for content ops. Report outcomes (complete/fail/abandon) back via NATS.
+for content ops. Report outcomes (complete/fail/abandon/yield) back via NATS.
 Workers never make HTTP calls to the sidecar — the dispatcher manages all
 lifecycle state on their behalf.
+
+Two worker modes:
+- **SimWorker** — creates a branch, commits a file, opens a PR, sleeps, then
+  yields. Used for testing without Forgejo Actions.
+- **ActionWorker** — creates a `work/action/{N}` branch, dispatches a Forgejo
+  Actions workflow on that branch, polls until complete, then yields. The action
+  run is tied to the branch so `prettyref` matches the PR's head ref.
+
+Both modes return `Outcome::Yield` after opening a PR. The CDC consumer detects
+`has_open_pr` and transitions the job to InReview.
 
 ### Work Factories
 Separate processes that generate work. They inspect current job state via the sidecar
@@ -201,7 +219,8 @@ event if they differ.
 |---|---|
 | Closed + (`status:done` label OR `closed_by_merge`) | Set `Done` in graph. Add `status:done` label if absent. Walk reverse deps — unblock any whose deps are all done. Publish transition. |
 | Closed + no done label + no merged PR | Set `Revoked` in graph. Publish transition. Dependents stay blocked. |
-| `on-ice` label | Set `OnIce` in graph. |
+| `on-ice` label, or no status label at all | Set `OnIce` in graph. (New issues without a status label default to on-ice.) |
+| `on-the-stack` + `has_open_pr` | Transition to `InReview`. Worker yielded after PR creation; CDC detected the open PR. |
 | Has unresolved deps | Set `Blocked`. Sync label to Forgejo if it doesn't match. |
 | No deps or all deps done | Set `OnDeck`. Sync label. Publish transition → dispatcher reacts. |
 | `on-the-stack`/`in-review`/`failed`/`rework` label | Respect the explicit status label. |
@@ -229,12 +248,13 @@ Worker                          Dispatcher (sidecar)              NATS KV / Forg
   │                                │                                │
   │  [work happens in Forgejo directly — branch, PR, comments]      │
   │                                │                                │
-  │── pub WorkerOutcome ──────────►│  (complete)                    │
-  │                                │── delete claims:{key} ────────►│
-  │                                │── PATCH label: in-review ─────►│ Forgejo
-  │                                │── PATCH remove assignee ──────►│ Forgejo
-  │                                │── pub JobTransition ───────────│
+  │── pub WorkerOutcome ──────────►│  (yield)                       │
+  │                                │── release worker (no transition│
+  │                                │   published — CDC owns it)     │
   │── pub IdleEvent ──────────────►│  (ready for next job)          │
+  │                                │                                │
+  │         [CDC detects has_open_pr → consumer transitions to InReview]
+  │         [Reviewer reacts: approve+merge or escalate to human]
 ```
 
 ### HTTP Claim Lifecycle (Legacy/Admin)
@@ -277,8 +297,9 @@ Posted as a Forgejo issue comment (machine-readable block + human-readable summa
 **Reason:** ...
 ```
 
-Failed jobs are not automatically retried. A human or work factory must call
-`POST /requeue` with `{ "target": "on-deck" | "on-ice" }`.
+Failed jobs are automatically retried up to 3 times by the dispatcher. After
+exhausting retries, a human or work factory must call `POST /requeue` with
+`{ "target": "on-deck" | "on-ice" }`.
 
 ---
 
@@ -327,6 +348,19 @@ POST /jobs/:owner/:repo/:number/requeue
   → 200 (no auth — admin/factory operation)
 ```
 
+### Repo resources
+```
+GET /repos/:owner/:repo/users
+  → { users: [UserInfo] }
+
+GET /repos/:owner/:repo/labels
+  → { labels: [ForgejoLabel] }
+
+POST /repos/:owner/:repo/issues
+  Body: { title: string, body?: string, labels?: [u64] }
+  → { number: u64 }
+```
+
 ### Webhook (Forgejo → Sidecar)
 ```
 POST /webhook
@@ -361,6 +395,8 @@ workflow/
         consumer.rs           # CDC stream consumer, publishes JobTransition events
         dispatcher.rs         # Centralized worker assignment, handles worker
                               #   lifecycle (heartbeat, outcome) via NATS
+        reviewer.rs           # Automated PR review: approve+merge or escalate
+                              #   to human (20% escalation rate)
         webhook.rs            # Legacy webhook dispatch (CDC is primary)
         api.rs                # HTTP handlers, publish transitions after mutations
         monitor.rs            # Background timeout scan, publishes transitions
@@ -376,6 +412,10 @@ workflow/
         worker.rs             # Worker trait: async fn execute(job, forgejo)
         dispatch.rs           # DispatchedWorkerLoop: pure NATS worker loop
         factory.rs            # WorkFactory trait: async fn poll(sidecar, forgejo)
+
+    forgejo-api/              # forgejo-api (library, generated)
+                              # OpenAPI-derived Forgejo REST API client
+                              # Used by worker crate and sidecar reviewer module
 
     cli/                      # worker-cli (binary)
       src/main.rs             # Interactive CLI worker, fixture seeding, admin
@@ -399,7 +439,7 @@ workflow/
    touching branches/PRs. The sidecar's CAS guarantee means no two workers race on
    the same job.
 6. **Default-deny.** No job moves to `on-deck` without explicit sidecar action.
-   `on-ice` is respected as a hold. Failed jobs do not auto-retry.
+   `on-ice` is respected as a hold. Failed jobs auto-retry up to `max_retries` (default 3, configurable via `retry:N` label); after exhausting retries, they stay in Failed until manually requeued.
 7. **Work factories are not special.** They are ordinary clients of the sidecar +
    Forgejo APIs. Job generation logic lives in the factory, not in the job system.
 

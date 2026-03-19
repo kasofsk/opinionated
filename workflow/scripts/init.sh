@@ -4,16 +4,15 @@
 # Idempotent: always tears down everything and rebuilds from scratch.
 #
 # What it does:
-#   1. Stops any running sidecar/CDC processes
-#   2. Tears down Docker containers, clears local state
-#   3. Starts Forgejo + NATS via docker compose
-#   4. Creates the admin user + API token
-#   5. Runs Terraform (destroy + apply) for repos, users, labels, webhooks
-#   6. Sets worker and sidecar passwords, creates sidecar API token
-#   7. Writes .sidecar.env
-#   8. Builds all binaries
-#   9. Starts CDC + sidecar
-#  10. Seeds a fixture and verifies the graph
+#   1. Tears down all Docker containers, clears local state
+#   2. Starts Forgejo + NATS via docker compose (infra only)
+#   3. Creates the admin user + API token
+#   4. Runs Terraform (destroy + apply) for repos, users, labels
+#   5. Sets worker/sidecar/reviewer passwords, creates API tokens
+#   6. Writes .sidecar.env
+#   7. Builds sidecar Docker image + worker-cli binary
+#   8. Starts CDC + sidecar via docker compose
+#   9. Seeds a fixture and verifies the graph
 #
 # Usage:
 #   ./scripts/init.sh                       # full setup with default hub fixture
@@ -58,31 +57,24 @@ done
 
 cd "$ROOT"
 
-# ── 1. Kill running processes ────────────────────────────────────────────────
-
-echo "🧹 Cleaning up running processes ..."
-pkill -f "target/debug/workflow-sidecar" 2>/dev/null || true
-pkill -f "target/debug/workflow-cdc" 2>/dev/null || true
-sleep 1
-echo "✓ Processes stopped"
-
-# ── 2. Tear down infra and clear state ───────────────────────────────────────
+# ── 1. Tear down everything ─────────────────────────────────────────────────
 
 echo "🗑  Tearing down containers and clearing state ..."
-docker compose down -v 2>/dev/null || true
 docker compose -f docker-compose.workers.yml --profile sim --profile action down -v 2>/dev/null || true
+docker compose down -v 2>/dev/null || true
+docker compose -f docker-compose.infra.yml down -v 2>/dev/null || true
 rm -rf .data/forgejo .data/workflow.db
 mkdir -p .data/forgejo/gitea/conf
 cp infra/forgejo/app.ini .data/forgejo/gitea/conf/app.ini
 echo "✓ Clean slate"
 
-# ── 3. Start infra ──────────────────────────────────────────────────────────
+# ── 2. Start infra ──────────────────────────────────────────────────────────
 
 echo "🐳 Starting infra (forgejo + nats) ..."
-docker compose up -d forgejo nats
+docker compose -f docker-compose.infra.yml up -d
 echo "✓ Containers started"
 
-# ── 4. Wait for Forgejo ─────────────────────────────────────────────────────
+# ── 3. Wait for Forgejo ─────────────────────────────────────────────────────
 
 echo "⏳ Waiting for Forgejo at $FORGEJO_URL ..."
 for i in $(seq 1 60); do
@@ -92,10 +84,10 @@ done
 curl -sf "$FORGEJO_URL/api/v1/version" > /dev/null 2>&1 || { echo "❌ Forgejo did not start"; exit 1; }
 echo "✓ Forgejo is up"
 
-# ── 5. Create admin user (idempotent) ───────────────────────────────────────
+# ── 4. Create admin user (idempotent) ───────────────────────────────────────
 
 echo "👤 Creating admin user '$ADMIN_USER' ..."
-docker compose exec -T -u git forgejo \
+docker compose -f docker-compose.infra.yml exec -T -u git forgejo \
     gitea admin user create \
     --username "$ADMIN_USER" \
     --password "$ADMIN_PASS" \
@@ -104,7 +96,7 @@ docker compose exec -T -u git forgejo \
     --must-change-password=false 2>&1 | grep -v "already exists" || true
 echo "✓ Admin user ready"
 
-# ── 6. Create admin token via REST API ──────────────────────────────────────
+# ── 5. Create admin token via REST API ──────────────────────────────────────
 
 echo "🔑 Creating admin token '$ADMIN_TOKEN_NAME' ..."
 curl -sf -X DELETE \
@@ -125,7 +117,7 @@ if [[ -z "$ADMIN_TOKEN" ]]; then
 fi
 echo "✓ Admin token obtained"
 
-# ── 7. Terraform: fresh state ───────────────────────────────────────────────
+# ── 6. Terraform: fresh state ───────────────────────────────────────────────
 
 cd "$ROOT/infra/test"
 rm -rf .terraform terraform.tfstate terraform.tfstate.backup
@@ -141,7 +133,7 @@ TF_VAR_human_password="$HUMAN_PASS" \
 terraform apply -auto-approve -input=false -var-file=test.tfvars
 echo "✓ Terraform apply complete"
 
-# ── 8. Set passwords + create sidecar token ─────────────────────────────────
+# ── 7. Set passwords + create sidecar token ─────────────────────────────────
 
 cd "$ROOT"
 
@@ -242,21 +234,26 @@ curl -sf -X PATCH \
     "$FORGEJO_URL/api/v1/admin/users/$HUMAN_LOGIN" > /dev/null
 echo "✓ Human reviewer '$HUMAN_LOGIN' password set"
 
-# ── 9. Write .sidecar.env ───────────────────────────────────────────────────
+# ── 8. Write .sidecar.env ───────────────────────────────────────────────────
+#
+# These are consumed by the sidecar Docker container. URLs use Docker
+# service names, not localhost. The docker-compose.yml environment section
+# overrides FORGEJO_URL, NATS_URL, DB_PATH, and LISTEN_ADDR with
+# docker-internal values — the .env file just carries the tokens.
 
 cat > .sidecar.env <<EOF
-FORGEJO_URL=$FORGEJO_URL
+FORGEJO_URL=http://forgejo:3000
 FORGEJO_TOKEN=$SIDECAR_TOKEN
 DISPATCHER_FORGEJO_TOKEN=$DISPATCHER_TOKEN
 REVIEWER_FORGEJO_TOKEN=$REVIEWER_TOKEN
 REVIEWER_HUMAN_LOGIN=$HUMAN_LOGIN
-NATS_URL=nats://localhost:4223
-DB_PATH=$ROOT/.data/workflow.db
+NATS_URL=nats://nats:4222
+DB_PATH=/data/workflow.db
 LISTEN_ADDR=0.0.0.0:8080
 EOF
 echo "✓ Wrote .sidecar.env"
 
-# ── 10. Push workflow files to repo ────────────────────────────────────────
+# ── 9. Push workflow files to repo ─────────────────────────────────────────
 
 echo "📄 Pushing workflow files to repo ..."
 REPO_OWNER="${REPO_OWNER:-sysadmin}"
@@ -291,43 +288,32 @@ for wf in action/sim-work.yml action/agent-work.yml; do
     echo "  ✓ $target_path"
 done
 
-# ── 11. Build ────────────────────────────────────────────────────────────────
+# ── 10. Build + start sidecar + CDC ──────────────────────────────────────
 
-echo "🔨 Building binaries ..."
-cargo build -p workflow-sidecar -p workflow-cdc -p worker-cli 2>&1 | grep -v "^$" | tail -3
+echo "🔨 Building sidecar image + worker-cli ..."
+docker build -t workflow-sidecar:latest -f Dockerfile.sidecar . 2>&1 | tail -5
+cargo build -p worker-cli 2>&1 | grep -v "^$" | tail -3
 echo "✓ Build complete"
 
-# ── 12. Start CDC + sidecar ─────────────────────────────────────────────────
-
-echo "🚀 Starting CDC process ..."
-FORGEJO_DB_PATH="$ROOT/.data/forgejo/gitea/gitea.db" \
-NATS_URL=nats://localhost:4223 \
-RUST_LOG=workflow_cdc=info \
-    "$ROOT/target/debug/workflow-cdc" > /tmp/workflow-cdc.log 2>&1 &
-CDC_PID=$!
-echo "✓ CDC started (pid $CDC_PID)"
-
-echo "🚀 Starting sidecar ..."
-env $(cat .sidecar.env | xargs) \
-RUST_LOG=workflow_sidecar=info \
-    "$ROOT/target/debug/workflow-sidecar" > /tmp/workflow-sidecar.log 2>&1 &
-SIDECAR_PID=$!
-echo "✓ Sidecar started (pid $SIDECAR_PID)"
+echo "🚀 Starting CDC + sidecar ..."
+docker compose up -d cdc sidecar
 
 # Wait for sidecar to be ready
-echo "⏳ Waiting for sidecar ..."
-for i in $(seq 1 30); do
+echo "⏳ Waiting for sidecar at http://localhost:8080 ..."
+for i in $(seq 1 60); do
     curl -sf http://localhost:8080/jobs > /dev/null 2>&1 && break
-    sleep 1
+    sleep 2
 done
-curl -sf http://localhost:8080/jobs > /dev/null 2>&1 || { echo "❌ Sidecar did not start"; exit 1; }
+curl -sf http://localhost:8080/jobs > /dev/null 2>&1 || { echo "❌ Sidecar did not start. Check: docker compose logs sidecar"; exit 1; }
 echo "✓ Sidecar is up"
 
-# ── 13. Seed fixture ────────────────────────────────────────────────────────
+# ── 11. Seed fixture ───────────────────────────────────────────────────────
 
 if [[ "$SEED" == "true" ]]; then
     echo "🌱 Seeding fixture: $FIXTURE ..."
-    env $(cat .sidecar.env | xargs) SIDECAR_URL=http://localhost:8080 \
+    FORGEJO_URL="$FORGEJO_URL" \
+    FORGEJO_TOKEN="$SIDECAR_TOKEN" \
+    SIDECAR_URL=http://localhost:8080 \
         "$ROOT/target/debug/worker-cli" seed sysadmin/workflow-test "$FIXTURE"
 
     # Brief pause for CDC to catch up
@@ -358,8 +344,6 @@ echo ""
 echo "  Human reviewer: $HUMAN_LOGIN / $HUMAN_PASS"
 echo "    Log in at $FORGEJO_URL to review PRs manually"
 echo ""
-echo "  Sidecar PID:   $SIDECAR_PID  (log: /tmp/workflow-sidecar.log)"
-echo "  CDC PID:       $CDC_PID  (log: /tmp/workflow-cdc.log)"
-echo ""
-echo "  To stop:  pkill -f workflow-sidecar; pkill -f workflow-cdc"
+echo "  Logs:  docker compose logs -f"
+echo "  Stop:  docker compose down"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

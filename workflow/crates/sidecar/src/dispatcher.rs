@@ -538,7 +538,9 @@ impl Dispatcher {
             OutcomeReport::Yield => {
                 // Worker is done but state transition is delegated to an
                 // external signal (e.g. CDC detecting a PR). Just release
-                // the claim — don't touch the job state or Forgejo labels.
+                // the claim — don't touch the job state or Forgejo labels,
+                // and don't publish a transition (the CDC consumer will do that
+                // when it detects the PR).
                 self.state
                     .journal(
                         "yield",
@@ -552,7 +554,16 @@ impl Dispatcher {
                     job_key = key,
                     "worker yielded job (external transition pending)"
                 );
-                JobState::OnTheStack // stays on-the-stack until CDC picks up the PR
+
+                // Release the worker but skip transition publishing.
+                if let Some(mut entry) = self.state.dispatch_registry.get_mut(&wo.worker_id) {
+                    entry.state = WorkerState::Transitioning;
+                    entry.current_job_key = None;
+                    entry.current_job_priority = None;
+                    entry.last_seen = Utc::now();
+                }
+
+                return Ok(());
             }
         };
 

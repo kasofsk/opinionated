@@ -1,12 +1,15 @@
 # Worker containers — start after init.sh has set up Forgejo + sidecar.
 #
 # Two modes:
-#   Sim workers:    ./scripts/workers.sh              (default)
-#   Action workers: ./scripts/workers.sh --action     (triggers Forgejo Actions)
+#   Sim workers:    ./scripts/workers.sh --sim        (sleep + yield)
+#   Action workers: ./scripts/workers.sh              (default, triggers Forgejo Actions)
 #
 # In action mode, each worker gets a paired act_runner container that executes
 # the dispatched workflow. The runner label matches the worker name so each
 # worker's actions run on "their" runner.
+
+include:
+  - docker-compose.infra.yml
 
 services:
 
@@ -180,7 +183,3 @@ volumes:
   runner-casey-data:
   action-cache:
 
-networks:
-  default:
-    external: true
-    name: workflow_default

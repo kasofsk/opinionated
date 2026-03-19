@@ -687,6 +687,12 @@
   .nw-link.pr-open    { border-color: rgba(46,204,113,0.3); color: #2ecc71; }
   .nw-link.pr-closed  { border-color: rgba(99,110,125,0.3); color: #636e7d; }
 
+  .nw-link.run-success  { border-color: rgba(46,204,113,0.3); color: #2ecc71; }
+  .nw-link.run-failure  { border-color: rgba(231,76,60,0.3); color: #e74c3c; }
+  .nw-link.run-running  { border-color: rgba(52,152,219,0.3); color: #3498db; }
+  .nw-link.run-waiting  { border-color: rgba(228,168,74,0.3); color: #e4a84a; }
+  .nw-link.run-blocked  { border-color: rgba(228,168,74,0.3); color: #e4a84a; }
+
   .journal-meta {
     font-size: 11px;
     color: rgba(255,255,255,0.3);
@@ -1208,12 +1214,67 @@ async function findLinkedPR(owner, repo, issueNumber) {
     const prs = await resp.json();
     const pattern = `Closes #${issueNumber}`;
     const linked = prs.find(pr => (pr.body || '').includes(pattern));
-    linkedPRs[key] = linked ? { number: linked.number, merged: linked.merged, state: linked.state } : null;
+    linkedPRs[key] = linked ? { number: linked.number, merged: linked.merged, state: linked.state, headRef: linked.head?.ref } : null;
     return linkedPRs[key];
   } catch {
     linkedPRs[key] = null;
     return null;
   }
+}
+
+// Cache for action runs: "owner/repo" → { runs: [...], ts: timestamp }
+const actionRunsCache = {};
+const ACTION_RUNS_TTL = 15000; // refresh every 15s
+
+async function fetchActionRuns(owner, repo) {
+  const repoKey = `${owner}/${repo}`;
+  const cached = actionRunsCache[repoKey];
+  if (cached && Date.now() - cached.ts < ACTION_RUNS_TTL) return cached.runs;
+
+  try {
+    const forgejoBase = 'http://localhost:3000';
+    const resp = await fetch(`${forgejoBase}/api/v1/repos/${owner}/${repo}/actions/runs?limit=50`);
+    if (!resp.ok) { actionRunsCache[repoKey] = { runs: [], ts: Date.now() }; return []; }
+    const data = await resp.json();
+    const runs = data.workflow_runs || data || [];
+    actionRunsCache[repoKey] = { runs, ts: Date.now() };
+    return runs;
+  } catch {
+    actionRunsCache[repoKey] = { runs: [], ts: Date.now() };
+    return [];
+  }
+}
+
+function getRunsForIssue(owner, repo, issueNumber, headRef) {
+  const cached = actionRunsCache[`${owner}/${repo}`];
+  if (!cached) return [];
+  return cached.runs.filter(r => {
+    // Primary: match by PR head branch (action dispatched on work branch)
+    if (headRef && r.prettyref === headRef) return true;
+    // Fallback: match by issue_number in workflow_dispatch payload
+    try {
+      if (r.event_payload) {
+        const payload = typeof r.event_payload === 'string' ? JSON.parse(r.event_payload) : r.event_payload;
+        if (payload.inputs && String(payload.inputs.issue_number) === String(issueNumber)) return true;
+      }
+    } catch {}
+    return false;
+  });
+}
+
+function runStatusClass(status) {
+  if (status === 'success') return 'run-success';
+  if (status === 'failure') return 'run-failure';
+  if (status === 'running') return 'run-running';
+  if (status === 'waiting' || status === 'blocked') return 'run-waiting';
+  return 'run-waiting';
+}
+
+function runStatusIcon(status) {
+  if (status === 'success') return '&#10003;';
+  if (status === 'failure') return '&#10005;';
+  if (status === 'running') return '&#9654;';
+  return '&#9679;';
 }
 
 async function refreshEscalatedJobs() {
@@ -1243,6 +1304,26 @@ function buildWidgetHtml(job, key, badge, forgejoBase) {
       const prClass = pr.merged ? 'pr-merged' : (pr.state === 'open' ? 'pr-open' : 'pr-closed');
       const prIcon = pr.merged ? '&#10003;' : (pr.state === 'open' ? '&#9679;' : '&#10005;');
       linksHtml += `<a class="nw-link ${prClass}" href="${prUrl}" target="_blank" title="PR #${pr.number}">${prIcon} PR #${pr.number}</a>`;
+    }
+
+    // Action runs matched by issue number (with branch matching as primary)
+    {
+      const runs = getRunsForIssue(job.repo_owner, job.repo_name, job.number, pr && pr.headRef);
+      // Group by workflow, show latest of each
+      const byWorkflow = {};
+      for (const run of runs) {
+        const wf = run.workflow_id || 'ci';
+        if (!byWorkflow[wf] || (run.index_in_repo || 0) > (byWorkflow[wf].index_in_repo || 0)) {
+          byWorkflow[wf] = run;
+        }
+      }
+      for (const run of Object.values(byWorkflow)) {
+        const cls = runStatusClass(run.status);
+        const icon = runStatusIcon(run.status);
+        const url = run.html_url || '#';
+        const label = (run.workflow_id || 'CI').replace(/\.ya?ml$/, '');
+        linksHtml += `<a class="nw-link ${cls}" href="${url}" target="_blank" title="${label}: ${run.status}">${icon} ${label}</a>`;
+      }
     }
 
     const isEscalated = escalatedJobs.has(key) && !['done', 'revoked'].includes(job.state);
@@ -1319,6 +1400,8 @@ function updateWidgets() {
   });
 
   // Kick off async PR lookups for in_review/rework/done jobs
+  // and fetch action runs for repos that have linked PRs
+  const reposNeedingRuns = new Set();
   cy.nodes().forEach(node => {
     const job = node.data('job');
     if (!job) return;
@@ -1331,7 +1414,18 @@ function updateWidgets() {
         });
       }
     }
+    // Queue action runs fetch for any repo with jobs
+    reposNeedingRuns.add(`${job.repo_owner}/${job.repo_name}`);
   });
+
+  // Fetch action runs for all repos (cache handles dedup/TTL)
+  for (const repoKey of reposNeedingRuns) {
+    const [owner, repo] = repoKey.split('/');
+    const cached = actionRunsCache[repoKey];
+    if (!cached || Date.now() - cached.ts >= ACTION_RUNS_TTL) {
+      fetchActionRuns(owner, repo).then(() => updateWidgets());
+    }
+  }
 }
 
 function deactivateRoster() {

@@ -4,8 +4,8 @@
 # Prerequisites: ./scripts/init.sh must have run (Forgejo + sidecar up).
 #
 # Usage:
-#   ./scripts/workers.sh              # start sim workers (default)
-#   ./scripts/workers.sh --action     # start action workers + paired runners
+#   ./scripts/workers.sh              # start action workers + paired runners (default)
+#   ./scripts/workers.sh --sim        # start sim workers (no runners needed)
 #   ./scripts/workers.sh --count 2    # start first 2 workers only
 #   ./scripts/workers.sh --down       # stop all worker/runner containers
 #   ./scripts/workers.sh --build      # rebuild worker image before starting
@@ -27,7 +27,7 @@ ALL_WORKERS=(worker-aria worker-blake worker-casey)
 # Parse args
 COUNT=${#ALL_WORKERS[@]}
 ACTION="up"
-MODE="sim"
+MODE="action"
 BUILD_FLAG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
         --down)    ACTION="down"; shift ;;
         --build)   BUILD_FLAG="--build"; shift ;;
         --delay)   DELAY_SECS="$2"; shift 2 ;;
-        --action)  MODE="action"; shift ;;
+        --sim)     MODE="sim"; shift ;;
         *)         echo "Unknown arg: $1"; exit 1 ;;
     esac
 done

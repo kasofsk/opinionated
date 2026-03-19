@@ -1,27 +1,41 @@
+include:
+  - docker-compose.infra.yml
+
 services:
 
-  forgejo:
-    image: codeberg.org/forgejo/forgejo:14
+  cdc:
+    image: workflow-sidecar:latest
+    command: [workflow-cdc]
+    environment:
+      DATABASE_URL: postgres://forgejo:forgejo@postgres:5432/forgejo
+      NATS_URL: nats://nats:4222
+      CDC_POLL_MS: "250"
+      RUST_LOG: workflow_cdc=info
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      nats:
+        condition: service_started
     restart: unless-stopped
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./.data/forgejo:/data             # host bind-mount so CDC can read gitea.db
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/v1/version"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 10s
 
-  nats:
-    image: nats:latest
-    restart: unless-stopped
-    command: --jetstream --store_dir /data
+  sidecar:
+    image: workflow-sidecar:latest
+    command: [workflow-sidecar]
+    env_file: .sidecar.env
+    environment:
+      RUST_LOG: workflow_sidecar=info
     volumes:
-      - nats-data:/data
+      - sidecar-data:/data
     ports:
-      - "4223:4222"   # 4223 to avoid conflict with any existing NATS on 4222
+      - "8080:8080"
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      cdc:
+        condition: service_started
+    restart: unless-stopped
 
 volumes:
-  nats-data:
+  sidecar-data:

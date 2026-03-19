@@ -12,7 +12,7 @@ Issues-based workflow orchestration for AI agents. Forgejo issues are jobs, a si
 
 This single command tears everything down and rebuilds from scratch. It starts all services and seeds a default fixture. When it finishes, the graph viewer is at `http://localhost:8080/graph` and Forgejo at `http://localhost:3000`.
 
-To start workers after init: `./scripts/workers.sh`
+To start workers after init: `./scripts/workers.sh` (action workers + runners by default)
 
 To stop: `pkill -f workflow-sidecar; pkill -f workflow-cdc` and `./scripts/workers.sh --down`
 
@@ -29,10 +29,11 @@ cargo test -p workflow-integration-tests -- --include-ignored  # integration tes
 | Crate | Kind | Purpose |
 |---|---|---|
 | `types` | lib | Shared types: Job, JobState, ClaimState, JobTransition, dispatch types, API request/response types |
-| `sidecar` | bin | Coordination gateway: CDC consumer, dispatcher, graph, claims, HTTP API, timeout monitor |
+| `sidecar` | bin | Coordination gateway: CDC consumer, dispatcher, reviewer, graph, claims, HTTP API, timeout monitor |
 | `cdc` | bin | Change data capture: watches Forgejo's SQLite DB, publishes IssueSnapshot to NATS |
 | `worker` | lib | SDK for building workers (NATS-based dispatched loop) and work factories |
 | `cli` | bin | Interactive CLI worker for manual testing, fixture seeding, admin commands |
+| `forgejo-api` | lib | Generated Forgejo REST API client (OpenAPI-derived), used by worker and sidecar reviewer |
 | `integration` | test | Integration tests against live Forgejo + sidecar |
 
 ## Data flow
@@ -51,7 +52,7 @@ Sidecar consumer
     ↓
 Dispatcher (subscribes to transitions + worker events)
     → assigns jobs to idle workers via NATS
-    → handles worker outcomes (complete/fail/abandon)
+    → handles worker outcomes (complete/fail/abandon/yield)
     → manages preemption for high-priority jobs
 ```
 
@@ -64,7 +65,7 @@ The consumer publishes `JobTransition` events whenever a job changes state. The 
 | Subject | Publisher | Subscriber | Payload |
 |---|---|---|---|
 | `workflow.changes` | CDC | Consumer | `IssueSnapshot` |
-| `workflow.jobs.transition` | Consumer, API, Monitor, Dispatcher | Dispatcher | `JobTransition` |
+| `workflow.jobs.transition` | Consumer, API, Monitor, Dispatcher | Dispatcher, Reviewer | `JobTransition` |
 | `workflow.dispatch.register` | Worker | Dispatcher | `WorkerRegistration` |
 | `workflow.dispatch.idle` | Worker | Dispatcher | `IdleEvent` |
 | `workflow.dispatch.heartbeat` | Worker | Dispatcher | `WorkerHeartbeat` |
@@ -83,8 +84,10 @@ The consumer publishes `JobTransition` events whenever a job changes state. The 
 - **Default-deny.** Jobs don't move to `on-deck` without explicit sidecar action. Failed jobs don't auto-retry. `on-ice` is a hold.
 - **Deterministic UUIDs.** IndraDB vertex IDs are UUID v5 from `{owner}/{repo}/{number}` — no separate index, no rebuild on restart.
 - **Dependency metadata lives in issue bodies** as `<!-- workflow:deps:1,2,3 -->` HTML comments, parsed by the sidecar from CDC snapshots.
-- **Review lifecycle.** Workers create PRs with `Closes #N`. After completion (in-review), a reviewer can add `status:rework` to route the job back to its original worker. Merging the PR auto-closes the issue → Done. Closing without a merged PR → Revoked (dependents stay blocked).
+- **Review lifecycle.** Workers create PRs with `Closes #N`. After the worker yields, the CDC detects the open PR and transitions to InReview. The automated reviewer (20% escalation chance) either approves+merges or escalates to a human reviewer. A reviewer can add `status:rework` to route the job back to its original worker. Merging the PR auto-closes the issue → Done. Closing without a merged PR → Revoked (dependents stay blocked).
+- **Yield, not complete.** Both sim and action workers report `Outcome::Yield` after opening a PR. The CDC-driven path (consumer detects `has_open_pr`) owns the InReview transition. The dispatcher does not publish a transition on yield — it only releases the worker.
 - **Worker re-announcement.** Idle workers periodically re-register with the dispatcher (every 15s). This ensures recovery after sidecar restarts without manual intervention.
+- **Action workers dispatch on work branches.** Action workers create a `work/action/{N}` branch before dispatching the Forgejo Actions workflow on it. This ties the action run to the branch (visible via `prettyref`), making it easy to correlate runs with issues in the graph viewer.
 
 ## Environment variables
 
@@ -98,6 +101,10 @@ The consumer publishes `JobTransition` events whenever a job changes state. The 
 | `NATS_URL` | `nats://localhost:4222` | |
 | `DB_PATH` | `./workflow.db` | RocksDB path |
 | `LISTEN_ADDR` | `0.0.0.0:3000` | |
+| `REVIEWER_FORGEJO_URL` | (same as FORGEJO_URL) | Reviewer identity URL |
+| `REVIEWER_FORGEJO_TOKEN` | (required) | Reviewer identity token (PR reviews, merge) |
+| `REVIEWER_HUMAN_LOGIN` | `you` | Human reviewer login for escalation |
+| `REVIEWER_DELAY_SECS` | `3` | Delay before reviewing (avoids PR creation race) |
 | `DEFAULT_TIMEOUT_SECS` | `3600` | |
 | `MONITOR_INTERVAL_SECS` | `60` | |
 
@@ -115,7 +122,7 @@ The consumer publishes `JobTransition` events whenever a job changes state. The 
 - **Forgejo config**: `infra/forgejo/app.ini` is copied into `.data/` before first boot. Includes CORS for the graph viewer's cross-origin API calls.
 - **Terraform** (`infra/`): Provisions repos, users, labels, collaborator permissions. Uses Lerentis/gitea provider.
 - **`scripts/init.sh`**: One-command setup. Teardown → infra → Terraform → build → CDC + sidecar → seed → verify.
-- **`scripts/workers.sh`**: Creates Forgejo API tokens and launches worker containers. Supports `--delay`, `--count`, `--build`, `--down`.
+- **`scripts/workers.sh`**: Creates Forgejo API tokens and launches worker containers. Defaults to action workers + paired runners. Supports `--sim` (sim workers only), `--delay`, `--count`, `--build`, `--down`.
 
 ## Gitignored runtime artifacts
 
