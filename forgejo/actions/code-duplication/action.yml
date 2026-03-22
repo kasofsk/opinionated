@@ -1,0 +1,43 @@
+name: Code Duplication Check
+description: Run jscpd on changed directories to detect copy-pasted code.
+
+inputs:
+  base_ref:
+    description: 'Base branch to diff against'
+    required: false
+    default: 'main'
+  node_version:
+    description: 'Node.js version for npx'
+    required: false
+    default: '20'
+  jscpd_version:
+    description: 'jscpd version'
+    required: false
+    default: '4.0.8'
+  max_dirs:
+    description: 'Maximum number of directories to check'
+    required: false
+    default: '20'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Check for duplicated code
+      shell: bash
+      run: |
+        dirs=$(git diff --name-only "origin/${{ inputs.base_ref }}...HEAD" \
+          | xargs -I {} dirname {} \
+          | sort -u \
+          | grep -v '^\.$' \
+          | grep -v '^\.' \
+          | head -${{ inputs.max_dirs }})
+        if [ -n "$dirs" ]; then
+          echo "$dirs" | xargs npx jscpd@${{ inputs.jscpd_version }}
+        else
+          echo "No changed directories to check."
+        fi

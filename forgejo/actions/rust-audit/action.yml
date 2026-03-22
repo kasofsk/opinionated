@@ -1,0 +1,23 @@
+name: Rust Audit
+description: Check dependencies for known security vulnerabilities.
+
+inputs:
+  working_directory:
+    description: 'Working directory containing Cargo.lock'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Install cargo-audit
+      shell: bash
+      run: |
+        if ! command -v cargo-audit &> /dev/null; then
+          cargo install cargo-audit --locked
+        fi
+
+    - name: Audit dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: cargo audit

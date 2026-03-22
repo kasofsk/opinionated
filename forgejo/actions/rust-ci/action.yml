@@ -1,0 +1,46 @@
+name: Rust CI
+description: Format check, clippy, test, unused deps, and doc check for a Cargo workspace.
+
+inputs:
+  cargo_args:
+    description: 'Extra args passed to cargo test and clippy (e.g., --all-features)'
+    required: false
+    default: '--all-features'
+  working_directory:
+    description: 'Working directory for cargo commands'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Format check
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: cargo fmt --check
+
+    - name: Clippy
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: cargo clippy --workspace --all-targets ${{ inputs.cargo_args }} -- -D warnings
+
+    - name: Test
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: cargo test --workspace ${{ inputs.cargo_args }}
+
+    - name: Check unused dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        if ! command -v cargo-machete &> /dev/null; then
+          cargo install cargo-machete --locked
+        fi
+        cargo machete
+
+    - name: Doc check
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        RUSTDOCFLAGS: "-D warnings"
+      run: cargo doc --workspace --no-deps ${{ inputs.cargo_args }}

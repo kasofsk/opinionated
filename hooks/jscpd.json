@@ -1,0 +1,27 @@
+{
+  "threshold": 0,
+  "minLines": 10,
+  "minTokens": 100,
+  "reporters": ["console"],
+  "noSymlinks": true,
+  "ignore": [
+    "**/node_modules/**",
+    "**/target/**",
+    "**/.dart_tool/**",
+    "**/build/**",
+    "**/dist/**",
+    "**/.wrangler/**",
+    "**/.symlinks/**",
+    "**/Pods/**",
+    "**/.terraform/**",
+    "**/*.g.dart",
+    "**/*.freezed.dart",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.json",
+    "**/*.md",
+    "**/test/**",
+    "**/tests/**",
+    "**/integration_test/**"
+  ]
+}

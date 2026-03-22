@@ -1,0 +1,52 @@
+name: Rust Coverage
+description: Run tests with llvm-cov and produce coverage reports.
+
+inputs:
+  cargo_args:
+    description: 'Extra args passed to cargo llvm-cov (e.g., --all-features)'
+    required: false
+    default: '--all-features'
+  working_directory:
+    description: 'Working directory for cargo commands'
+    required: false
+    default: '.'
+  upload_artifact:
+    description: 'Upload coverage as an artifact'
+    required: false
+    default: 'true'
+  artifact_name:
+    description: 'Name of the uploaded artifact'
+    required: false
+    default: 'rust-coverage'
+  retention_days:
+    description: 'Artifact retention in days'
+    required: false
+    default: '30'
+
+runs:
+  using: composite
+  steps:
+    - name: Install llvm-cov
+      shell: bash
+      run: |
+        if ! cargo llvm-cov --version &> /dev/null; then
+          cargo install cargo-llvm-cov --locked
+        fi
+
+    - name: Run tests with coverage
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        cargo llvm-cov --workspace ${{ inputs.cargo_args }} --lcov --output-path coverage.lcov
+        cargo llvm-cov report
+        cargo llvm-cov report --html --output-dir coverage-html
+
+    - name: Upload coverage artifact
+      if: inputs.upload_artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: |
+          ${{ inputs.working_directory }}/coverage.lcov
+          ${{ inputs.working_directory }}/coverage-html/
+        retention-days: ${{ inputs.retention_days }}

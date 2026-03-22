@@ -1,0 +1,77 @@
+name: Flutter CI
+description: Format check, analyze, custom lint, test, and coverage for a Flutter app.
+
+inputs:
+  working_directory:
+    description: 'Path to the Flutter app directory'
+    required: false
+    default: '.'
+  flutter_version:
+    description: 'Flutter version to install (leave empty to use pre-installed)'
+    required: false
+    default: ''
+  run_custom_lint:
+    description: 'Run dart run custom_lint'
+    required: false
+    default: 'true'
+  coverage:
+    description: 'Run tests with --coverage'
+    required: false
+    default: 'true'
+  upload_artifact:
+    description: 'Upload coverage as an artifact'
+    required: false
+    default: 'true'
+  artifact_name:
+    description: 'Name of the uploaded artifact'
+    required: false
+    default: 'flutter-coverage'
+  retention_days:
+    description: 'Artifact retention in days'
+    required: false
+    default: '30'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Flutter
+      if: inputs.flutter_version != ''
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ inputs.flutter_version }}
+        channel: 'stable'
+        cache: true
+
+    - name: Get dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: flutter pub get --suppress-analytics
+
+    - name: Format check
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: dart format --output none --set-exit-if-changed .
+
+    - name: Analyze
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: flutter analyze
+
+    - name: Custom lint
+      if: inputs.run_custom_lint == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: dart run custom_lint
+
+    - name: Test
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: flutter test ${{ inputs.coverage == 'true' && '--coverage' || '' }}
+
+    - name: Upload coverage artifact
+      if: inputs.coverage == 'true' && inputs.upload_artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ inputs.working_directory }}/coverage/lcov.info
+        retention-days: ${{ inputs.retention_days }}

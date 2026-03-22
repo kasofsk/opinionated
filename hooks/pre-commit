@@ -1,0 +1,54 @@
+#!/bin/sh
+# Pre-commit dispatcher
+#
+# Reads .githooks-enabled to determine which hooks to run.
+# Each hook receives STAGED_FILES and runs only if relevant files changed.
+
+set -e
+
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+CONFIG="$REPO_ROOT/.githooks-enabled"
+
+if [ ! -f "$CONFIG" ]; then
+    echo "No .githooks-enabled found. Run hooks/install.sh to configure."
+    exit 0
+fi
+
+export STAGED_FILES
+STAGED_FILES=$(git diff --cached --name-only)
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+# Source project-level overrides if present (e.g., FLUTTER_APP_DIR, RUST_PATHS)
+if [ -f "$REPO_ROOT/.githooks-env" ]; then
+    . "$REPO_ROOT/.githooks-env"
+fi
+
+FAILED=0
+
+while IFS= read -r hook; do
+    # Skip empty lines and comments
+    case "$hook" in
+        ''|\#*) continue ;;
+    esac
+
+    HOOK_SCRIPT="$HOOKS_DIR/$hook.sh"
+    if [ ! -f "$HOOK_SCRIPT" ]; then
+        echo "Warning: hook script not found: $hook.sh"
+        continue
+    fi
+
+    if ! sh "$HOOK_SCRIPT"; then
+        FAILED=1
+        break
+    fi
+done < "$CONFIG"
+
+if [ "$FAILED" -ne 0 ]; then
+    exit 1
+fi
+
+echo "Pre-commit checks passed!"
